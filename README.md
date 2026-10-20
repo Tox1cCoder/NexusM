@@ -8,9 +8,9 @@ Open `dist\NexusM.exe`. Keep the other files in `dist` beside it. The portable a
 
 Enter your personal Nexus Mods API key under **Settings**. NexusM reuses a key already configured for the current Windows account and encrypts it with Windows DPAPI in `%LOCALAPPDATA%\NexusM\api-key.bin`. The key is never embedded in the executable, source, library backup, or download sidecar. Each Windows account configures its own key.
 
-1. Your Nexus favourite games sync when the app opens. Add/remove games locally as needed; local additions and exclusions survive syncing. **Your games only** filters the library and update checks to this list by default. Turn it off to see/check all imported mods, including older games; selecting one game still narrows the table to that game. Removing a game preserves its history for later. These controls do not change your favourites on the website.
+1. Your saved library appears immediately when the app opens. NexusM then syncs your favourite games and checks your known mods automatically, with progress shown while you browse. Add/remove games locally as needed; local additions and exclusions survive syncing. **Your games only** filters the library and update checks to this list by default. Turn it off to see/check all imported mods, including older games; selecting one game still narrows the table to that game. Removing a game preserves its history for later. These controls do not change your favourites on the website.
 2. Click **Import history → Open Nexus history**, sign in in the window, wait for Download history to load, and click **Import history** in that window. Select All games or a specific game. This step discovers which mods belong in your library.
-3. Click **Check for updates**. For known mods, NexusM refreshes metadata and your account's last download dates through the API, including downloads made outside the app. A newer mod update is a prompt to review, because it may affect an optional file you do not use.
+3. Current metadata loads automatically after a history import. Use **Check for updates** whenever you want another check during the same session. NexusM fetches metadata and your account's last download dates together in batches of up to 80 mods, including downloads made outside the app. Up to four requests run at once, and the list updates as results arrive. Missing or inaccessible mods retain their previous information. A newer mod update is a prompt to review, because it may affect an optional file you do not use.
 4. Open a mod to read its description, changelogs, requirements, and individual file cards. Multiple main files and optional files remain separate. **Mark reviewed** dismisses the current update without changing your download date.
 5. Click **Get this file**, or select several files and click **Download selected**. NexusM handles the website's normal free-download controls and countdown automatically in its embedded browser, then receives the authorized `nxm://` link and saves the archive in your chosen folder. The browser stays out of the way unless Nexus needs sign-in, cookie preferences, a browser check, or manual help. Installation is manual.
 
@@ -38,10 +38,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Backend.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryImport.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 ```
 
-`-Test` performs read-only live API checks with the locally encrypted key. Other suites use isolated fixtures and do not need a Nexus account. The UI smoke test runs the real WebView window, its bridge, and `tests\ui-checks.js`:
+`-Test` performs read-only live API checks with the locally encrypted key. Other suites use isolated fixtures and do not need a Nexus account. `Test-ModBatch.ps1 -Live` additionally verifies live batch pagination; `Test-Refresh.ps1 -Live` measures a full update check against an isolated copy of your library without changing your saved data. The UI smoke test runs the real WebView window, its bridge, and `tests\ui-checks.js`:
 
 ```powershell
 Start-Process .\dist\NexusM.exe -ArgumentList '--smoke-test', "$PWD\artifacts\ui-smoke.json" -Wait

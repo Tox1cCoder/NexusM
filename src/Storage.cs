@@ -49,6 +49,7 @@ namespace NexusM
                 if (new[] { "downloading", "queued", "authorizing", "retrying", "waiting-authorization" }.Contains(Data.Str(row, "status"))) { row["status"] = "interrupted"; row["error"] = "The app closed before this download finished. Retry to authorize and resume."; }
             }
             State["connected"] = false;
+            State.Remove("refreshProgress");
         }
         internal List<object> Games { get { return (List<object>)State["games"]; } }
         private static bool RegexPath(string path) { return System.Text.RegularExpressions.Regex.IsMatch(path, @"^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)"); }

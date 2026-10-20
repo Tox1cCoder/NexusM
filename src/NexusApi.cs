@@ -11,6 +11,8 @@ namespace NexusM
 {
     public sealed class NexusApi : IDisposable
     {
+        public const int ModBatchSize = 80;
+        private static readonly string AppVersion = typeof(NexusApi).Assembly.GetName().Version.ToString(3);
         private readonly HttpClient client;
         private readonly SemaphoreSlim concurrency = new SemaphoreSlim(4);
         private readonly string apiKey;
@@ -27,7 +29,7 @@ namespace NexusM
             apiKey = key.Trim();
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             var handler = new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
-                AllowAutoRedirect = false };
+                AllowAutoRedirect = false, MaxConnectionsPerServer = 4 };
             client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
         }
 
@@ -60,6 +62,66 @@ namespace NexusM
             return GetAsync(ModPath(domain, modId) + "/files/" + fileId.ToString(CultureInfo.InvariantCulture) + ".json", token);
         }
 
+        // List refreshes need only these small fields. Fetching them together also includes
+        // account download dates, instead of issuing a v1 request for every library entry.
+        // Nexus may omit deleted or inaccessible mods and does not preserve input order.
+        public async Task<object> ModsByUidAsync(IEnumerable<long> uids, CancellationToken token = default(CancellationToken))
+        {
+            if (uids == null) throw new ArgumentNullException("uids");
+            token.ThrowIfCancellationRequested();
+            var requested = new HashSet<long>();
+            var ids = new List<string>();
+            foreach (long uid in uids)
+            {
+                token.ThrowIfCancellationRequested();
+                if (uid <= 0 || !requested.Add(uid)) continue;
+                if (ids.Count == 100) throw new ArgumentException("Check at most 100 unique mod IDs per request.", "uids");
+                ids.Add(uid.ToString(CultureInfo.InvariantCulture));
+            }
+            if (ids.Count == 0) return new object[0];
+            const string query = "query NexusMLibraryStatus($uids: [ID!]!, $offset: Int!, $count: Int!) { modsByUid(uids: $uids, offset: $offset, count: $count) { totalCount nodes { uid modId gameId name summary version author pictureUrl status updatedAt viewerDownloaded viewerUpdateAvailable } } }";
+            var results = new List<object>();
+            var returned = new HashSet<long>();
+            int offset = 0;
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                var data = JsonTools.Dict(await SendGraphqlAsync(query, new { uids = ids.ToArray(), offset = offset, count = ModBatchSize }, token).ConfigureAwait(false));
+                var collection = JsonTools.Dict(JsonTools.Get(data, "modsByUid"));
+                object rawNodes = JsonTools.Get(collection, "nodes");
+                long total = JsonTools.Long(collection, "totalCount");
+                if ((!(rawNodes is object[]) && !(rawNodes is System.Collections.IList)) ||
+                    JsonTools.Get(collection, "totalCount") == null || total < 0 || total > requested.Count)
+                    throw new NexusApiException("Nexus returned an incomplete mod list. Your previous information was kept.", 502);
+                var nodes = JsonTools.Array(rawNodes);
+                if (nodes.Length == 0 && offset < total)
+                    throw new NexusApiException("Nexus returned an incomplete mod list. Your previous information was kept.", 502);
+                foreach (object item in nodes)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var node = JsonTools.Dict(item);
+                    long uid = JsonTools.Long(node, "uid"), gameId = JsonTools.Long(node, "gameId"), modId = JsonTools.Long(node, "modId");
+                    DateTimeOffset updated;
+                    // Ignore malformed and unrelated rows; the caller retains its cached row
+                    // when a requested UID is missing. IDs also guard against mismatched data.
+                    if (uid <= 0 || !requested.Contains(uid) || returned.Contains(uid) || gameId <= 0 ||
+                        gameId > Int32.MaxValue || modId <= 0 || modId > UInt32.MaxValue ||
+                        ((gameId << 32) | modId) != uid || !(JsonTools.Get(node, "name") is string) ||
+                        !(JsonTools.Get(node, "version") is string) || !(JsonTools.Get(node, "summary") is string) ||
+                        String.IsNullOrWhiteSpace(JsonTools.Text(node, "status")) ||
+                        !DateTimeOffset.TryParse(JsonTools.Text(node, "updatedAt"), CultureInfo.InvariantCulture,
+                            DateTimeStyles.AssumeUniversal, out updated)) continue;
+                    returned.Add(uid);
+                    results.Add(node);
+                }
+                // Nexus currently caps a page at 80 even when count:100 is requested.
+                // Follow the reported total so larger batches never silently lose rows.
+                offset += nodes.Length;
+                if (offset >= total) break;
+            }
+            return results.ToArray();
+        }
+
         // Enumerating account history is not public API functionality, but known mod UIDs
         // can be checked in batches. A null date means Nexus has no download for this viewer.
         public async Task<object> BatchViewerDownloadsAsync(IEnumerable<long> uids, CancellationToken token = default(CancellationToken))
@@ -73,7 +135,7 @@ namespace NexusM
                 token.ThrowIfCancellationRequested();
                 if (uid <= 0 || !distinct.Add(uid)) continue;
                 batch.Add(uid.ToString(CultureInfo.InvariantCulture));
-                if (batch.Count == 100)
+                if (batch.Count == ModBatchSize)
                 {
                     results.AddRange(await ViewerBatchAsync(batch.ToArray(), token).ConfigureAwait(false));
                     batch.Clear();
@@ -85,8 +147,8 @@ namespace NexusM
 
         private async Task<object[]> ViewerBatchAsync(string[] uids, CancellationToken token)
         {
-            const string query = "query NexusMDownloadStatus($uids: [ID!]!) { modsByUid(uids: $uids, count: 100) { nodes { uid viewerDownloaded viewerUpdateAvailable } } }";
-            var data = JsonTools.Dict(await SendGraphqlAsync(query, new { uids = uids }, token).ConfigureAwait(false));
+            const string query = "query NexusMDownloadStatus($uids: [ID!]!, $count: Int!) { modsByUid(uids: $uids, count: $count) { nodes { uid viewerDownloaded viewerUpdateAvailable } } }";
+            var data = JsonTools.Dict(await SendGraphqlAsync(query, new { uids = uids, count = ModBatchSize }, token).ConfigureAwait(false));
             var nodes = JsonTools.Array(JsonTools.Get(JsonTools.Dict(JsonTools.Get(data, "modsByUid")), "nodes"));
             var results = new List<object>();
             foreach (object item in nodes)
@@ -154,8 +216,8 @@ namespace NexusM
                     {
                         request.Headers.TryAddWithoutValidation("apikey", apiKey);
                         request.Headers.TryAddWithoutValidation("Application-Name", "NexusM");
-                        request.Headers.TryAddWithoutValidation("Application-Version", "0.1.0");
-                        request.Headers.TryAddWithoutValidation("User-Agent", "NexusM/0.1.0 (personal desktop client)");
+                        request.Headers.TryAddWithoutValidation("Application-Version", AppVersion);
+                        request.Headers.TryAddWithoutValidation("User-Agent", "NexusM/" + AppVersion + " (personal desktop client)");
                         request.Headers.TryAddWithoutValidation("Accept", "application/json");
                         if (body != null) request.Content = new StringContent(JsonTools.Serializer().Serialize(body), Encoding.UTF8, "application/json");
                         HttpResponseMessage response;

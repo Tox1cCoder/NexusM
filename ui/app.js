@@ -11,13 +11,14 @@
   let activeGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
   let selectedFiles = new Set();
   let lastFocus = null, lastNotice = null;
+  let loadingLibrary = false, refreshPromise = null;
 
   function rpc(action, payload = {}) {
     const bridge = window.chrome?.webview;
     if (!bridge) return Promise.reject(new Error('Open NexusM.exe to connect to Nexus and use local files.'));
     const id = String(++sequence);
     return new Promise((resolve,reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error('This request is taking longer than expected. Please try again.')); }, action === 'refresh' || action === 'importData' ? 180000 : 90000);
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('This request is taking longer than expected. Please try again.')); }, ['refresh','initialize','importData'].includes(action) ? 180000 : 90000);
       pending.set(id,{resolve,reject,timer});
       bridge.postMessage({id,action,payload});
     });
@@ -38,10 +39,7 @@
     }
     if(msg.event==='error') toast(msg.data?.message || msg.data || 'Something went wrong.',true);
     if(msg.event==='notice') toast(msg.data?.message || msg.data);
-    if(msg.event==='refreshProgress'){
-      const done=Number(msg.data?.done||0),total=Number(msg.data?.total||0);
-      $('#refresh-button span').textContent=total?`Checking ${done} / ${total}…`:'Checking for updates…';
-    }
+    if(msg.event==='refreshProgress'){state.refreshProgress=msg.data||{};renderRefresh();}
   }
   window.chrome?.webview?.addEventListener('message',e=>receive(e.data));
 
@@ -58,13 +56,40 @@
     catch(error){toast(error.message,true);return null;}
     finally{if(button){button.disabled=false;button.classList.remove('busy');}}
   }
+  function renderRefresh(){
+    const progress=state.refreshProgress||{},running=progress.running===true||!!refreshPromise;
+    const busy=loadingLibrary||running,button=$('#refresh-button'),status=$('#refresh-status');
+    button.disabled=busy;button.classList.toggle('busy',busy);button.setAttribute('aria-busy',String(busy));
+    const done=Number(progress.done||0),total=Number(progress.total||0);
+    $('#refresh-button span').textContent=running?(progress.phase==='connecting'?'Connecting to Nexus…':total?`Checking ${done} / ${total}…`:'Checking for updates…'):loadingLibrary?'Loading library…':'Check for updates';
+    status.classList.toggle('hidden',!running);
+    status.textContent=running?(progress.message||'Checking your saved mods. You can keep browsing your library.'):'';
+  }
+  function checkUpdates(action='refresh',payload={}){
+    if(refreshPromise)return refreshPromise;
+    if(state.refreshProgress?.running===true)return Promise.resolve();
+    refreshPromise=(async()=>{
+      try{consume(await rpc(action,payload));}
+      catch(error){toast(error.message,true);}
+      finally{refreshPromise=null;state.refreshProgress={...state.refreshProgress,running:false};renderRefresh();}
+    })();
+    renderRefresh();return refreshPromise;
+  }
+  async function loadLibrary(){
+    loadingLibrary=true;renderRefresh();
+    try{
+      consume(await rpc('getState'));
+      if(state.user||state.settings.hasApiKey)await checkUpdates('initialize');
+    }catch(error){toast(error.message,true);}
+    finally{loadingLibrary=false;renderRefresh();}
+  }
   function consume(result) {if(result?.games || result?.mods || result?.downloads)setState(result);else if(result?.state)setState(result.state);}
   function setState(next) {
     if(!next || typeof next!=='object')return;
     state={...state,...next,settings:{...state.settings,...next.settings}};
     state.games=Array.isArray(state.games)?state.games:[];state.mods=Array.isArray(state.mods)?state.mods:[];state.downloads=Array.isArray(state.downloads)?state.downloads:[];
     if(activeGame&&!state.games.some(g=>gameDomain(g)===activeGame))activeGame=null;
-    renderGames();renderMods();renderDownloads();renderSettings();renderCounts();
+    renderGames();renderMods();renderDownloads();renderSettings();renderCounts();renderRefresh();
     if(next.notice&&next.notice!==lastNotice)toast(next.notice);
     lastNotice=next.notice||null;
   }
@@ -233,7 +258,7 @@
     if(target.dataset.addResult){const result=await run('addGame',{query:target.dataset.addResult},target);if(result!==null)$('#input-dialog').close();return;}
     if(target.dataset.removeMod){const mod=detail?.mod;closeDetail();if(mod){consume(await run('removeMod',{gameDomain:modDomain(mod),modId:modId(mod)}));toast('Mod removed from your local library.');}return;}
     const handlers={
-      'refresh-button':async()=>{await run('refresh',activeGame?{gameDomain:activeGame}:{},target);$('#refresh-button span').textContent='Check for updates';},
+      'refresh-button':()=>checkUpdates('refresh',activeGame?{gameDomain:activeGame}:{}),
       'add-game-button':addGame,'game-strip-add':addGame,'add-mod-button':addMod,'empty-add':addMod,
       'sync-games-button':()=>run('syncGames',{},target,'Your Nexus favourite games are synced.'),
       'import-history-button':importHistory,'empty-import':importHistory,'settings-import':importHistory,
@@ -242,7 +267,7 @@
       'clear-downloads-button':async()=>{await run('clearDownloads',{},target);renderDownloads();},
       'your-games-only':()=>run('saveSettings',{yourGamesOnly:state.settings.yourGamesOnly===false},target),
       'toggle-key':()=>{const input=$('#api-key');input.type=input.type==='password'?'text':'password';target.textContent=input.type==='password'?'Show':'Hide';},
-      'save-key-button':async()=>{const apiKey=$('#api-key').value.trim();if(!apiKey){toast('Paste your personal Nexus API key first.',true);return;}const result=await run('saveSettings',{apiKey},target);if(result!==null){$('#api-key').value='';$('#api-key').type='password';$('#toggle-key').textContent='Show';toast('Connected to Nexus Mods.');}},
+      'save-key-button':async()=>{const apiKey=$('#api-key').value.trim();if(!apiKey){toast('Paste your personal Nexus API key first.',true);return;}const result=await run('saveSettings',{apiKey},target);if(result!==null){$('#api-key').value='';$('#api-key').type='password';$('#toggle-key').textContent='Show';toast('Connected to Nexus Mods.');await checkUpdates('initialize');}},
       'browse-folder-button':async()=>{const result=await run('browseFolder',{},target);if(typeof result==='string')$('#download-folder').value=result;else if(result?.path)$('#download-folder').value=result.path;else if(result?.downloadFolder)$('#download-folder').value=result.downloadFolder;},
       'save-folder-button':()=>run('saveSettings',{downloadFolder:$('#download-folder').value},target,'Download location saved.'),
       'clear-cache-button':()=>run('clearCache',{},target,'Image cache cleared.'),
@@ -268,5 +293,5 @@
   // Exposed for host-driven refreshes and local smoke tests, never contains the key.
   window.NexusM={setState,receive,navigate,showMod};
   setState(state);
-  if(window.chrome?.webview){$('#last-checked').textContent='Connecting to Nexus…';run('getState');}
+  if(window.chrome?.webview)loadLibrary();
 })();

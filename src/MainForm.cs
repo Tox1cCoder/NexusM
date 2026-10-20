@@ -49,7 +49,8 @@ namespace NexusM
                     object id = null;
                     try {
                         var message = Data.Map(Data.Json.DeserializeObject(e.WebMessageAsJson)); id = Data.Get(message, "id");
-                        var result = await Controller.Handle(Data.Str(message, "action"), Data.Get(message, "payload"));
+                        // Smoke tests read the real cache but never launch a whole-library update.
+                        var result = smokeReport != null && Data.Str(message, "action") == "initialize" ? storage.PublicState() : await Controller.Handle(Data.Str(message, "action"), Data.Get(message, "payload"));
                         Reply(Data.Obj("id", id, "ok", true, "result", result));
                     } catch (Exception ex) { Reply(Data.Obj("id", id, "ok", false, "error", ex.Message)); }
                 };
@@ -301,7 +302,7 @@ namespace NexusM
                 var items = Data.List(Data.Get(result, "items"));
                 if (items.Count == 0) throw new InvalidOperationException("No downloaded mods were found. Check that you are signed in and viewing Download history.");
                 await owner.Controller.ImportHistory(items);
-                status.Text = "Imported " + items.Count + " mods." + (Data.Bool(result, "partial") ? " Only visible rows were available. Import other pages too." : " You can close this window and check updates.");
+                status.Text = "Imported " + items.Count + " mods." + (Data.Bool(result, "partial") ? " Only visible rows were available. Import other pages too." : " You can close this window.");
             } catch (Exception ex) { status.Text = ex.Message; }
             finally { importing = false; if (!IsDisposed) import.Enabled = true; }
         }

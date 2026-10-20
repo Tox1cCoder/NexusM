@@ -6,6 +6,7 @@
   const bridge = window.chrome.webview;
   const originalPost = bridge.postMessage;
   let snapshot = null;
+  let refreshRequest = null;
   const requests = [];
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
   const check = async (name, test) => {
@@ -23,7 +24,7 @@
     ],
     downloads:[{id:'interrupted-fixture',gameDomain:'game1',modId:1,fileId:10,name:'Interrupted archive',status:'interrupted',error:'The app closed before this download finished.'}],
     settings:{hasApiKey:true,downloadFolder:'C:\\Downloads\\NexusM',yourGamesOnly:true},
-    user:{name:'UI fixture',isPremium:false},lastCheckedAt:1792500000
+    user:{name:'UI fixture',isPremium:false},lastCheckedAt:1792500000,refreshProgress:{running:false}
   };
   const fakeDetails = {
     mod:{...fixture.mods[0],summary:'Safe summary',description:'<p>Keep <strong>author instructions</strong>.</p><script>window.__uiInjected=true</script><img src="javascript:window.__uiInjected=true" onerror="window.__uiInjected=true"><a href="javascript:window.__uiInjected=true">Unsafe link</a><iframe src="https://untrusted.example"></iframe><a href="https://www.nexusmods.com/game1/mods/1">Safe link</a>'},
@@ -47,6 +48,7 @@
       });
       bridge.postMessage=function(message){
         if(message.action==='getModDetails')queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:fakeDetails}));
+        else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
           queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{state:{settings:{yourGamesOnly:message.payload.yourGamesOnly}}}}));
@@ -157,10 +159,41 @@
         expect($('#clear-downloads-button').disabled,'Clear list should be disabled with only active transfers.');
         expect($('#download-count').textContent==='2','Remaining transfers should still count as active.');
       });
-      await check('refresh progress is visible',()=>{
-        window.NexusM.receive({event:'refreshProgress',data:{done:3,total:9}});
+      await check('automatic refresh shows progress and keeps the cached library usable',()=>{
+        window.NexusM.navigate('library');
+        window.NexusM.receive({event:'refreshProgress',data:{running:true,phase:'connecting',message:'Connecting to Nexus.'}});
+        expect($('#refresh-button').disabled&&$('#refresh-button span').textContent.includes('Connecting'),'Startup connection should show a disabled busy update button.');
+        window.NexusM.receive({event:'refreshProgress',data:{running:true,phase:'mods',done:3,total:9,message:'Checking your saved mods.'}});
         expect($('#refresh-button span').textContent.includes('3 / 9'),'Refresh progress is missing.');
-        $('#refresh-button span').textContent='Check for updates';
+        expect(!$('#refresh-status').classList.contains('hidden')&&$('#refresh-status').textContent.includes('Checking your saved mods'),'Refresh status is missing.');
+        $('#mod-search').value='beta';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+        expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='game1:2','The cached library must remain searchable during an update check.');
+        $('#mod-search').value='';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+        window.NexusM.setState({mods:fixture.mods.map(m=>m.modId===1?{...m,version:'2.1'}:m)});
+        expect($('[data-mod-key="game1:1"] .version-chip').textContent==='2.1','New metadata should appear while the update check continues.');
+        expect($('#refresh-button').disabled,'A library update should not clear the running status.');
+        window.NexusM.receive({event:'refreshProgress',data:{running:false}});
+        expect(!$('#refresh-button').disabled&&$('#refresh-button span').textContent==='Check for updates'&&$('#refresh-status').classList.contains('hidden'),'Finishing an automatic check should reset the update control.');
+        window.NexusM.setState({mods:fixture.mods});
+      });
+      await check('manual refresh ignores repeated clicks and restores the button',async()=>{
+        const before=requests.filter(r=>r.action==='refresh').length;
+        $('#refresh-button').click();$('#refresh-button').click();
+        expect(requests.filter(r=>r.action==='refresh').length===before+1,'Repeated clicks should submit one update check.');
+        expect($('#refresh-button').disabled&&$('#refresh-button').classList.contains('busy'),'A manual check should become busy immediately.');
+        expect($$('#mods-body tr[data-mod-key]').length===3,'Cached rows should remain visible while waiting for Nexus.');
+        window.NexusM.receive({id:refreshRequest.id,ok:true,result:{refreshProgress:{running:false},mods:fixture.mods,lastCheckedAt:1792600000}});
+        refreshRequest=null;await settle();
+        expect(!$('#refresh-button').disabled&&!$('#refresh-button').classList.contains('busy'),'A completed manual check should restore the button.');
+        expect($('#last-checked').textContent.startsWith('Checked '),'The check timestamp should update.');
+      });
+      await check('failed refresh preserves cached rows and releases the update control',async()=>{
+        $('#refresh-button').click();
+        window.NexusM.receive({id:refreshRequest.id,ok:false,error:'Nexus is temporarily unavailable.'});
+        refreshRequest=null;await settle();
+        expect(!$('#refresh-button').disabled&&$('#refresh-button span').textContent==='Check for updates','A failed check should allow retry.');
+        expect($$('#mods-body tr[data-mod-key]').length===3,'A failed check must keep the saved library.');
+        expect($('.toasts').textContent.includes('temporarily unavailable'),'The connection error should be shown without a blocking dialog.');
       });
       await check('key masking, folder, storage, and protocol controls exist',()=>{
         window.NexusM.navigate('settings');
@@ -184,6 +217,8 @@
       });
     } catch(error) {report.checks.push({test:'UI fixture setup',passed:false,error:error.message});}
     finally {
+      if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
+      window.NexusM.receive({event:'refreshProgress',data:{running:false}});
       bridge.postMessage=originalPost;
       if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();
       $('#mod-search').value='';$('#mod-sort').value='updated';

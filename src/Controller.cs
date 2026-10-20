@@ -18,6 +18,9 @@ namespace NexusM
         private DownloadService downloader;
         private readonly MainForm window;
         private bool initialized;
+        private bool disposed;
+        private Task initializationTask, refreshTask;
+        private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
         private List<object> catalogue;
         private readonly Dictionary<string, CancellationTokenSource> transfers = new Dictionary<string, CancellationTokenSource>();
         private readonly Dictionary<string, object> details = new Dictionary<string, object>();
@@ -33,17 +36,17 @@ namespace NexusM
         private void RequireApi() { if (Api == null) throw new InvalidOperationException("Add your personal Nexus API key in Settings."); }
         internal async Task<object> Handle(string action, object payload) {
             var p = Data.Map(payload);
-            if (action == "getState") {
-                if (!initialized) { initialized = true; if (Api != null) { try { await Connect(); await SyncGames(); } catch (Exception ex) { Store.State["notice"] = "Your saved library is available offline. " + ex.Message; } } }
-                return Store.PublicState();
-            }
+            if (action == "getState") return Store.PublicState();
+            if (action == "initialize") { await Initialize(); return Store.PublicState(); }
             if (action == "saveSettings") {
                 if (p.ContainsKey("yourGamesOnly") && !(p["yourGamesOnly"] is bool)) throw new ArgumentException("Your games filter must be enabled or disabled.");
                 if (p.ContainsKey("apiKey") && !String.IsNullOrWhiteSpace(Data.Str(p, "apiKey"))) {
                     if (transfers.Count > 0) throw new InvalidOperationException("Finish or cancel active downloads before changing your API key.");
                     string key = Data.Str(p, "apiKey").Trim();
                     using (var candidate = new NexusApi(key)) { await candidate.ValidateAsync(); }
-                    Store.WriteKey(key); ResetApi(); await Connect();
+                    if (initializationTask != null) await initializationTask;
+                    if (refreshTask != null) await refreshTask;
+                    Store.WriteKey(key); ResetApi(); initialized = false; initializationTask = null; await Connect();
                 }
                 if (p.ContainsKey("downloadFolder")) { string folder = Path.GetFullPath(Data.Str(p, "downloadFolder")); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
                 if (p.ContainsKey("yourGamesOnly")) Store.Settings["yourGamesOnly"] = (bool)p["yourGamesOnly"];
@@ -65,7 +68,11 @@ namespace NexusM
                 Store.Save(); Emit(); return Store.PublicState();
             }
             if (action == "removeMod") { Store.Mods.RemoveAll(x => Data.Str(x, "gameDomain") == Data.Str(p, "gameDomain") && Data.Num(x, "modId") == Data.Num(p, "modId")); Store.Save(); Emit(); return Store.PublicState(); }
-            if (action == "refresh") { await Refresh(Data.Str(p, "gameDomain")); Emit(); return Store.PublicState(); }
+            if (action == "refresh") {
+                if (initializationTask != null && !initializationTask.IsCompleted) await initializationTask;
+                else await Refresh(Data.Str(p, "gameDomain"));
+                Emit(); return Store.PublicState();
+            }
             if (action == "getModDetails") return await Details(Data.Str(p, "gameDomain"), Data.Num(p, "modId"));
             if (action == "startDownload") { await AuthorizeDownload(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId")); return Store.PublicState(); }
             if (action == "cancelDownload") {
@@ -116,14 +123,39 @@ namespace NexusM
             throw new ArgumentException("Unknown app action: " + action);
         }
         private string Folder { get { return Data.Str(Store.Settings, "downloadFolder"); } }
+        private Task Initialize() {
+            if (Api == null) return Task.FromResult(0);
+            if (initialized) return initializationTask ?? Task.FromResult(0);
+            initialized = true; initializationTask = InitializeCore(); return initializationTask;
+        }
+        private async Task InitializeCore() {
+            Progress(true, "connecting", 0, 0, "Connecting to Nexus Mods...");
+            try {
+                await Connect(); Emit();
+                string gamesNotice = "";
+                try { await SyncGames(); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { gamesNotice = " Your saved games were kept because game sync failed: " + ex.Message; }
+                Emit(); await Refresh("");
+                if (gamesNotice.Length > 0) { Store.State["notice"] = Data.Str(Store.State, "notice") + gamesNotice; Store.Save(); Emit(); }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { if (!disposed) { Store.State["notice"] = "Your saved library is available offline. " + ex.Message; Store.Save(); Emit(); } }
+            finally { if (!disposed) { Progress(false, "", 0, 0, ""); Emit(); } }
+        }
+        private void Progress(bool running, string phase, int done, int total, string message) {
+            if (disposed) return;
+            var progress = Data.Obj("running", running, "phase", phase, "done", done, "total", total, "message", message);
+            Store.State["refreshProgress"] = progress; window.Emit("refreshProgress", progress);
+        }
         private async Task Connect() {
-            RequireApi(); var account = Data.Map(await Api.ValidateAsync());
+            RequireApi(); var account = Data.Map(await Api.ValidateAsync(lifetime.Token));
             Store.State["user"] = Data.Obj("name", Data.Str(account, "name"), "isPremium", Data.Bool(account, "is_premium"), "id", Data.Num(account, "user_id"));
             Store.State["connected"] = true; Store.State.Remove("notice");
         }
         internal async Task SyncGames() {
             RequireApi();
-            var response = await Api.SendGraphqlAsync("query NexusMFavourites { favouriteGames { id name domainName artworkSchema } gameArtwork { schemaV1 { tile } schemaV2 { tile } } }", null);
+            var response = await Api.SendGraphqlAsync("query NexusMFavourites { favouriteGames { id name domainName artworkSchema } gameArtwork { schemaV1 { tile } schemaV2 { tile } } }", null, lifetime.Token);
             var favorites = Data.List(Data.Get(response, "favouriteGames"));
             var replacement = new List<object>();
             foreach (var game in favorites) {
@@ -194,30 +226,87 @@ namespace NexusM
             var old = FindMod(domain, id); var updated = NormalizeMod(domain, id, raw, old);
             if (old == null) Store.Mods.Add(updated);
         }
-        private async Task Refresh(string domain) {
+        private Task Refresh(string domain) {
+            if (refreshTask != null && !refreshTask.IsCompleted) return refreshTask;
+            refreshTask = RefreshCore(domain); return refreshTask;
+        }
+        private async Task ResolveModUids(List<object> selected) {
+            var gameIds = new Dictionary<string, long>();
+            foreach (var game in Store.Games) if (Data.Num(game, "id") > 0) gameIds[Data.Str(game, "domain")] = Data.Num(game, "id");
+            foreach (var entry in selected) {
+                long uid = Data.Num(entry, "uid");
+                if (uid > 0 && (uid & UInt32.MaxValue) == Data.Num(entry, "modId") && !gameIds.ContainsKey(Data.Str(entry, "gameDomain"))) gameIds[Data.Str(entry, "gameDomain")] = uid >> 32;
+            }
+            var groups = selected.GroupBy(x => Data.Str(x, "gameDomain")).ToArray();
+            await Task.WhenAll(groups.Select(async group => {
+                long gameId;
+                if (!gameIds.TryGetValue(group.Key, out gameId)) {
+                    try { gameId = Data.Num(await Api.GameAsync(group.Key, lifetime.Token), "id"); }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { foreach (var entry in group) { Data.Map(entry)["uid"] = 0L; Data.Map(entry)["error"] = ex.Message; } return; }
+                }
+                foreach (var entry in group) {
+                    long modId = Data.Num(entry, "modId");
+                    if (gameId > 0 && gameId <= Int32.MaxValue && modId > 0 && modId <= UInt32.MaxValue) Data.Map(entry)["uid"] = (gameId << 32) | modId;
+                    else { Data.Map(entry)["uid"] = 0L; Data.Map(entry)["error"] = "The Nexus game or mod ID could not be resolved. Previous information was kept."; }
+                }
+            }));
+        }
+        private void ApplyBatchMod(object entry, object raw) {
+            var mod = Data.Map(entry);
+            foreach (var pair in new[] { new[] { "name", "name" }, new[] { "summary", "summary" }, new[] { "version", "version" }, new[] { "author", "author" }, new[] { "pictureUrl", "pictureUrl" } }) {
+                string value = Data.Str(raw, pair[1]);
+                if (!String.IsNullOrWhiteSpace(value)) mod[pair[0]] = value;
+            }
+            mod["updatedAt"] = Data.Timestamp(Data.Get(raw, "updatedAt"));
+            long downloadedAt = Data.Timestamp(Data.Get(raw, "viewerDownloaded"));
+            if (downloadedAt > Data.Num(mod, "lastDownloadedAt")) mod["lastDownloadedAt"] = downloadedAt;
+            mod["available"] = Data.Str(raw, "status").Equals("published", StringComparison.OrdinalIgnoreCase);
+            mod["needsReview"] = Data.Num(mod, "updatedAt") > Math.Max(Data.Num(mod, "lastDownloadedAt"), Data.Num(mod, "reviewedAt"));
+            mod["lastCheckedAt"] = Data.Now(); mod.Remove("error");
+            details.Remove(Data.Str(mod, "gameDomain") + ":" + Data.Num(mod, "modId"));
+        }
+        private async Task RefreshCore(string domain) {
             RequireApi(); var activeDomains = new HashSet<string>(Store.Games.Select(x => Data.Str(x, "domain")));
             bool yourGamesOnly = Data.Bool(Store.Settings, "yourGamesOnly");
             var selected = Store.Mods.Where(x => String.IsNullOrEmpty(domain) ? !yourGamesOnly || activeDomains.Contains(Data.Str(x, "gameDomain")) : Data.Str(x, "gameDomain") == domain).ToList();
-            if (selected.Count == 0) { Store.State["notice"] = "Import your Nexus download history or add a mod URL first."; return; }
             int done = 0, failed = 0;
-            var tasks = selected.Select(async entry => {
-                try { await RefreshOne(Data.Str(entry, "gameDomain"), Data.Num(entry, "modId")); }
-                catch (Exception ex) { Data.Map(entry)["error"] = ex.Message; failed++; }
-                done++; window.Emit("refreshProgress", Data.Obj("done", done, "total", selected.Count));
-            }).ToArray();
-            await Task.WhenAll(tasks);
+            Progress(true, "mods", 0, selected.Count, "Checking current mod information...");
             try {
-                var statuses = Data.List(await Api.BatchViewerDownloadsAsync(selected.Select(x => Data.Num(x, "uid"))));
-                foreach (var status in statuses) {
-                    var mod = selected.Select(Data.Map).FirstOrDefault(x => Data.Num(x, "uid") == Data.Num(status, "uid"));
-                    if (mod == null) continue;
-                    long downloadedAt = Data.Timestamp(Data.Get(status, "viewerDownloaded"));
-                    if (downloadedAt > Data.Num(mod, "lastDownloadedAt")) mod["lastDownloadedAt"] = downloadedAt;
-                    mod["needsReview"] = Data.Num(mod, "updatedAt") > Math.Max(Data.Num(mod, "lastDownloadedAt"), Data.Num(mod, "reviewedAt"));
+                if (selected.Count == 0) { Store.State["notice"] = "Import your Nexus download history or add a mod URL first."; return; }
+                await ResolveModUids(selected);
+                var resolved = selected.Where(x => Data.Num(x, "uid") > 0).ToList();
+                done = failed = selected.Count - resolved.Count;
+                // Four workers bound network concurrency and update the UI after each batch.
+                int next = 0;
+                Func<Task> worker = async delegate {
+                    while (next < resolved.Count) {
+                        lifetime.Token.ThrowIfCancellationRequested();
+                        var batch = resolved.Skip(next).Take(NexusApi.ModBatchSize).ToList(); next += batch.Count;
+                        try {
+                            var nodes = Data.List(await Api.ModsByUidAsync(batch.Select(x => Data.Num(x, "uid")), lifetime.Token)).ToDictionary(x => Data.Num(x, "uid"));
+                            foreach (var entry in batch) {
+                                object node;
+                                if (nodes.TryGetValue(Data.Num(entry, "uid"), out node)) ApplyBatchMod(entry, node);
+                                else { Data.Map(entry)["error"] = "Nexus did not return this mod. Its previous information was kept."; failed++; }
+                            }
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { foreach (var entry in batch) Data.Map(entry)["error"] = ex.Message; failed += batch.Count; }
+                        done += batch.Count;
+                        Progress(true, "mods", done, selected.Count, "Checked " + done + " of " + selected.Count + " mods."); Emit();
+                    }
+                };
+                await Task.WhenAll(Enumerable.Range(0, Math.Min(4, Math.Max(1, (resolved.Count + NexusApi.ModBatchSize - 1) / NexusApi.ModBatchSize))).Select(x => worker()));
+                Store.State["lastCheckedAt"] = Data.Now();
+                Store.State["notice"] = failed == 0 ? "Update check complete." : "Checked " + done + " mods; " + failed + " could not be reached. Their previous information was kept.";
+                Store.State["rateLimits"] = Api.RateLimits;
+            }
+            finally {
+                if (!disposed) {
+                    Progress(false, "", done, selected.Count, ""); Store.Save(); Emit();
                 }
-            } catch { /* Keep imported and completed-download dates when account history is temporarily unavailable. */ }
-            details.Clear(); Store.State["lastCheckedAt"] = Data.Now(); Store.State["notice"] = failed == 0 ? "Update check complete." : "Checked " + done + " mods; " + failed + " could not be reached. Their previous information was kept.";
-            Store.State["rateLimits"] = Api.RateLimits; Store.Save();
+            }
         }
         private async Task<object> Details(string domain, long id) {
             RequireApi(); domain = JsonTools.Domain(domain); string cacheKey = domain + ":" + id;
@@ -269,7 +358,12 @@ namespace NexusM
                 old["needsReview"] = Data.Num(old, "updatedAt") > Math.Max(Data.Num(old, "lastDownloadedAt"), Data.Num(old, "reviewedAt")); count++;
             }
             // The import can include games outside current favourites; keep the website favourites strip intact.
-            Store.State["notice"] = "Imported " + count + " mod history entries. Check updates to load current metadata."; Store.Save(); Emit(); await Task.FromResult(0);
+            Store.State["notice"] = "Imported " + count + " mod history entries."; Store.Save(); Emit();
+            if (count > 0 && initialized && Api != null) {
+                if (initializationTask != null) await initializationTask;
+                if (refreshTask != null) await refreshTask;
+                await Refresh("");
+            }
         }
         private async Task ImportText(string text) {
             if (String.IsNullOrWhiteSpace(text) || text.Length > 24 * 1024 * 1024) throw new ArgumentException("Choose a JSON/HTML history file or paste up to 24 MB of history content.");
@@ -367,6 +461,12 @@ namespace NexusM
         }
         internal object ExportData() { return Data.Obj("schemaVersion", 1, "games", Store.Games, "mods", Store.Mods, "downloads", Store.Downloads, "fileDownloads", Data.Get(Store.State, "fileDownloads"), "excludedGames", Data.Get(Store.State, "excludedGames")); }
         private void Emit() { window.Emit("state", Store.PublicState()); }
-        public void Dispose() { foreach (var token in transfers.Values) token.Cancel(); if (downloader != null) downloader.Dispose(); if (Api != null) Api.Dispose(); Store.Save(); }
+        public void Dispose() {
+            if (disposed) return;
+            disposed = true; lifetime.Cancel();
+            foreach (var token in transfers.Values) token.Cancel();
+            if (downloader != null) downloader.Dispose(); if (Api != null) Api.Dispose();
+            Store.State.Remove("refreshProgress"); Store.Save();
+        }
     }
 }
