@@ -1,0 +1,8 @@
+dist/
+artifacts/
+*.user
+*.log
+*.pdb
+api-key*
+state.json
+.vs/

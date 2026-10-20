@@ -1,0 +1,220 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace NexusM
+{
+    public sealed class NexusApi : IDisposable
+    {
+        private readonly HttpClient client;
+        private readonly SemaphoreSlim concurrency = new SemaphoreSlim(4);
+        private readonly string apiKey;
+        private object validated;
+        private readonly Dictionary<string, long> gameIds = new Dictionary<string, long>();
+        private readonly object limitLock = new object();
+        private Dictionary<string, object> limits = new Dictionary<string, object>();
+        public object RateLimits { get { lock (limitLock) return new Dictionary<string, object>(limits); } }
+
+        public NexusApi(string key)
+        {
+            if (String.IsNullOrWhiteSpace(key) || key.Contains("\r") || key.Contains("\n"))
+                throw new ArgumentException("Set your Nexus personal API key in Settings first.");
+            apiKey = key.Trim();
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            var handler = new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate,
+                AllowAutoRedirect = false };
+            client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
+        }
+
+        public async Task<object> ValidateAsync(CancellationToken token = default(CancellationToken))
+        {
+            if (validated != null) return validated;
+            var result = JsonTools.Dict(await GetAsync("users/validate.json", token).ConfigureAwait(false));
+            // Nexus echoes the credential in this response. Never expose it to the UI or local JSON.
+            result.Remove("key");
+            result.Remove("email");
+            validated = result;
+            return result;
+        }
+
+        public Task<object> GamesAsync(CancellationToken token = default(CancellationToken)) { return GetAsync("games.json?include_unapproved=false", token); }
+        public Task<object> GameAsync(string domain, CancellationToken token = default(CancellationToken)) { return GetAsync("games/" + JsonTools.Domain(domain) + ".json", token); }
+        public Task<object> TrackedModsAsync(CancellationToken token = default(CancellationToken)) { return GetAsync("user/tracked_mods.json", token); }
+        public async Task<object> ModAsync(string domain, long modId, CancellationToken token = default(CancellationToken))
+        {
+            object result = await GetAsync(ModPath(domain, modId) + ".json", token).ConfigureAwait(false);
+            long gameId = JsonTools.Long(JsonTools.Dict(result), "game_id");
+            if (gameId > 0) lock (gameIds) gameIds[JsonTools.Domain(domain)] = gameId;
+            return result;
+        }
+        public Task<object> FilesAsync(string domain, long modId, CancellationToken token = default(CancellationToken)) { return GetAsync(ModPath(domain, modId) + "/files.json", token); }
+        public Task<object> ChangelogsAsync(string domain, long modId, CancellationToken token = default(CancellationToken)) { return GetAsync(ModPath(domain, modId) + "/changelogs.json", token); }
+        public Task<object> FileAsync(string domain, long modId, long fileId, CancellationToken token = default(CancellationToken))
+        {
+            CheckId(fileId);
+            return GetAsync(ModPath(domain, modId) + "/files/" + fileId.ToString(CultureInfo.InvariantCulture) + ".json", token);
+        }
+
+        // Enumerating account history is not public API functionality, but known mod UIDs
+        // can be checked in batches. A null date means Nexus has no download for this viewer.
+        public async Task<object> BatchViewerDownloadsAsync(IEnumerable<long> uids, CancellationToken token = default(CancellationToken))
+        {
+            if (uids == null) throw new ArgumentNullException("uids");
+            var distinct = new HashSet<long>();
+            var batch = new List<string>();
+            var results = new List<object>();
+            foreach (long uid in uids)
+            {
+                token.ThrowIfCancellationRequested();
+                if (uid <= 0 || !distinct.Add(uid)) continue;
+                batch.Add(uid.ToString(CultureInfo.InvariantCulture));
+                if (batch.Count == 100)
+                {
+                    results.AddRange(await ViewerBatchAsync(batch.ToArray(), token).ConfigureAwait(false));
+                    batch.Clear();
+                }
+            }
+            if (batch.Count > 0) results.AddRange(await ViewerBatchAsync(batch.ToArray(), token).ConfigureAwait(false));
+            return results.ToArray();
+        }
+
+        private async Task<object[]> ViewerBatchAsync(string[] uids, CancellationToken token)
+        {
+            const string query = "query NexusMDownloadStatus($uids: [ID!]!) { modsByUid(uids: $uids, count: 100) { nodes { uid viewerDownloaded viewerUpdateAvailable } } }";
+            var data = JsonTools.Dict(await SendGraphqlAsync(query, new { uids = uids }, token).ConfigureAwait(false));
+            var nodes = JsonTools.Array(JsonTools.Get(JsonTools.Dict(JsonTools.Get(data, "modsByUid")), "nodes"));
+            var results = new List<object>();
+            foreach (object item in nodes)
+            {
+                var node = JsonTools.Dict(item);
+                long uid = JsonTools.Long(node, "uid");
+                if (uid <= 0) continue;
+                results.Add(new Dictionary<string, object> { { "uid", uid },
+                    { "viewerDownloaded", JsonTools.Get(node, "viewerDownloaded") },
+                    { "viewerUpdateAvailable", JsonTools.Get(node, "viewerUpdateAvailable") } });
+            }
+            return results.ToArray();
+        }
+
+        public Task<object> DownloadLinksAsync(DownloadRequest request, CancellationToken token)
+        {
+            CheckId(request.FileId);
+            string path = ModPath(request.Domain, request.ModId) + "/files/" + request.FileId + "/download_link.json";
+            if (!String.IsNullOrEmpty(request.Key))
+                path += "?key=" + Uri.EscapeDataString(request.Key) + "&expires=" + request.Expires.ToString(CultureInfo.InvariantCulture);
+            return GetAsync(path, token);
+        }
+
+        public async Task<object> RequirementsAsync(string domain, long modId, CancellationToken token = default(CancellationToken))
+        {
+            CheckId(modId);
+            domain = JsonTools.Domain(domain);
+            long gameId;
+            lock (gameIds) gameIds.TryGetValue(domain, out gameId);
+            if (gameId <= 0)
+            {
+                var game = JsonTools.Dict(await GameAsync(domain, token).ConfigureAwait(false));
+                gameId = JsonTools.Long(game, "id");
+                if (gameId > 0) lock (gameIds) gameIds[domain] = gameId;
+            }
+            string query = "query NexusMRequirements($modId: ID!, $gameId: ID!) { mod(modId: $modId, gameId: $gameId) { modRequirements { nexusRequirements { nodes { modName modId gameId notes url externalRequirement } } dlcRequirements { notes gameExpansion { name } } } } }";
+            var data = JsonTools.Dict(await SendGraphqlAsync(query, new { modId = modId.ToString(CultureInfo.InvariantCulture), gameId = gameId.ToString(CultureInfo.InvariantCulture) }, token).ConfigureAwait(false));
+            return JsonTools.Get(JsonTools.Dict(JsonTools.Get(data, "mod")), "modRequirements");
+        }
+
+        public async Task<object> SendGraphqlAsync(string query, object variables, CancellationToken token = default(CancellationToken))
+        {
+            var payload = new { query = query, variables = variables };
+            var raw = JsonTools.Dict(await RequestAsync(new Uri("https://api.nexusmods.com/v2/graphql"), payload, token).ConfigureAwait(false));
+            var errors = JsonTools.Array(JsonTools.Get(raw, "errors"));
+            if (errors.Length > 0)
+                throw new NexusApiException("Nexus could not provide this optional account or requirements information. Use Open on Nexus to view it.", 400);
+            return JsonTools.Get(raw, "data");
+        }
+
+        private Task<object> GetAsync(string path, CancellationToken token)
+        {
+            return RequestAsync(new Uri("https://api.nexusmods.com/v1/" + path), null, token);
+        }
+
+        private async Task<object> RequestAsync(Uri uri, object body, CancellationToken token)
+        {
+            await concurrency.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                for (int attempt = 0; ; attempt++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    using (var request = new HttpRequestMessage(body == null ? HttpMethod.Get : HttpMethod.Post, uri))
+                    {
+                        request.Headers.TryAddWithoutValidation("apikey", apiKey);
+                        request.Headers.TryAddWithoutValidation("Application-Name", "NexusM");
+                        request.Headers.TryAddWithoutValidation("Application-Version", "0.1.0");
+                        request.Headers.TryAddWithoutValidation("User-Agent", "NexusM/0.1.0 (personal desktop client)");
+                        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+                        if (body != null) request.Content = new StringContent(JsonTools.Serializer().Serialize(body), Encoding.UTF8, "application/json");
+                        HttpResponseMessage response;
+                        try { response = await client.SendAsync(request, token).ConfigureAwait(false); }
+                        catch (TaskCanceledException)
+                        {
+                            token.ThrowIfCancellationRequested();
+                            throw new NexusApiException("Nexus did not respond in time. Please try again.", 408);
+                        }
+                        catch (HttpRequestException)
+                        {
+                            throw new NexusApiException("Could not reach Nexus Mods. Check your connection and try again.", 0);
+                        }
+                        using (response)
+                        {
+                            UpdateLimits(response);
+                            int code = (int)response.StatusCode;
+                            if ((code == 502 || code == 503 || code == 504) && attempt < 2)
+                            { await Task.Delay(1000 * (attempt + 1), token).ConfigureAwait(false); continue; }
+                            if (!response.IsSuccessStatusCode) throw new NexusApiException(ErrorMessage(code), code);
+                            string text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                            if (text.Length > 24 * 1024 * 1024) throw new NexusApiException("Nexus returned too much data for this request.", 502);
+                            try { return JsonTools.Serializer().DeserializeObject(text); }
+                            catch (ArgumentException) { throw new NexusApiException("Nexus returned an unreadable response. Please try again.", 502); }
+                        }
+                    }
+                }
+            }
+            finally { concurrency.Release(); }
+        }
+
+        private void UpdateLimits(HttpResponseMessage response)
+        {
+            string[] names = { "x-rl-hourly-limit", "x-rl-hourly-remaining", "x-rl-daily-limit", "x-rl-daily-remaining", "x-rl-hourly-reset", "x-rl-daily-reset" };
+            lock (limitLock)
+                foreach (string name in names)
+                {
+                    IEnumerable<string> values;
+                    if (response.Headers.TryGetValues(name, out values)) limits[name] = String.Join(",", values);
+                }
+        }
+
+        private static string ErrorMessage(int code)
+        {
+            if (code == 401) return "Nexus rejected your API key. Update it in Settings.";
+            if (code == 403) return "Nexus denied this request. Free downloads must be authorized using Download with Manager on the website; the link can expire.";
+            if (code == 404) return "This game, mod, or file is no longer available on Nexus Mods.";
+            if (code == 429) return "Nexus API rate limit reached. Wait before checking again.";
+            if (code == 410) return "This Nexus file or download link has expired or was removed.";
+            if (code == 422) return "Nexus could not accept this request. Open a fresh download link on the website.";
+            return "Nexus returned HTTP " + code + ". Please try again later.";
+        }
+
+        private static string ModPath(string domain, long modId)
+        {
+            CheckId(modId);
+            return "games/" + JsonTools.Domain(domain) + "/mods/" + modId.ToString(CultureInfo.InvariantCulture);
+        }
+        private static void CheckId(long id) { if (id <= 0) throw new ArgumentException("Nexus IDs must be positive numbers."); }
+        public void Dispose() { client.Dispose(); }
+    }
+}
