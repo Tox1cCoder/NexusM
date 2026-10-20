@@ -35,7 +35,7 @@
     if(msg.event==='state') setState(msg.data);
     if(msg.event==='download' || msg.event==='downloadProgress') {
       if(msg.data?.downloads) setState(msg.data);
-      else if(msg.data?.id){const i=state.downloads.findIndex(d=>String(d.id)===String(msg.data.id));if(i>=0)state.downloads[i]={...state.downloads[i],...msg.data};else state.downloads.unshift(msg.data);renderDownloads();renderCounts();}
+      else if(msg.data?.id){const i=state.downloads.findIndex(d=>String(d.id)===String(msg.data.id));if(i>=0)state.downloads[i]={...state.downloads[i],...msg.data};else state.downloads.unshift(msg.data);renderDownloads();renderCounts();refreshFileDownloadFlags();}
     }
     if(msg.event==='error') toast(msg.data?.message || msg.data || 'Something went wrong.',true);
     if(msg.event==='notice') toast(msg.data?.message || msg.data);
@@ -89,7 +89,7 @@
     state={...state,...next,settings:{...state.settings,...next.settings}};
     state.games=Array.isArray(state.games)?state.games:[];state.mods=Array.isArray(state.mods)?state.mods:[];state.downloads=Array.isArray(state.downloads)?state.downloads:[];
     if(activeGame&&!state.games.some(g=>gameDomain(g)===activeGame))activeGame=null;
-    renderGames();renderMods();renderDownloads();renderSettings();renderCounts();renderRefresh();
+    renderGames();renderMods();renderDownloads();renderSettings();renderCounts();renderRefresh();refreshFileDownloadFlags();
     if(next.notice&&next.notice!==lastNotice)toast(next.notice);
     lastNotice=next.notice||null;
   }
@@ -206,6 +206,28 @@
     renderDetailTab();
   }
   function categoryName(file){const category=file.category??file.categoryName??file.category_name??file.category_id??'Other files';const map={1:'Main files',2:'Updates',3:'Optional files',4:'Old versions',5:'Miscellaneous',6:'Old versions',MAIN:'Main files',OPTIONAL:'Optional files',UPDATE:'Updates',OLD_VERSION:'Old versions',MISCELLANEOUS:'Miscellaneous',ARCHIVED:'Old versions'};return map[category] || (/^main/i.test(category)?'Main files':/^optional/i.test(category)?'Optional files':String(category));}
+  function fileDownloadedAt(file){
+    if(!detail)return 0;
+    const domain=modDomain(detail.mod),mod=modId(detail.mod),id=fileId(file),key=`${domain}:${mod}:${id}`;
+    const recordedTime=value=>{const number=Number(value);return Number.isFinite(number)?number>0?timestamp(number):0:Math.max(0,timestamp(value));};
+    let at=recordedTime(file.downloadedAt);
+    const saved=state.fileDownloads?.[key];
+    if(saved?.status==='completed')at=Math.max(at,recordedTime(saved.downloadedAt));
+    for(const record of state.downloads)if(record.status==='completed'&&modDomain(record)===domain&&modId(record)===mod&&fileId(record)===id)at=Math.max(at,recordedTime(record.downloadedAt));
+    return at;
+  }
+  function fileDownloadFlag(at){return `${at?icon('check'):''}${at?'Downloaded':'No download recorded'}`;}
+  function refreshFileDownloadFlags(){
+    if(!detail||detailTab!=='files')return;
+    for(const file of detail.files){
+      const card=$(`[data-file-card="${fileId(file)}"]`,$('#detail-panel'));if(!card)continue;
+      const at=fileDownloadedAt(file),flag=$('.file-download-flag',card),when=$('.file-downloaded-date',card);
+      if(!flag||!when||card.dataset.downloadedAt===String(at))continue;
+      card.dataset.downloadedAt=String(at);flag.classList.toggle('downloaded',!!at);flag.innerHTML=fileDownloadFlag(at);
+      flag.title=at?'This exact file has a recorded download. Installation is manual.':'No download date is available for this exact file.';
+      when.textContent=at?`Last downloaded ${date(at,true)}`:'';when.classList.toggle('hidden',!at);
+    }
+  }
   function renderDetailTab(){
     if(!detail)return;const el=$('#detail-tab-body');if(!el)return;const mod=detail.mod;
     if(detailTab==='overview')el.innerHTML=`${mod.summary?`<p class="detail-summary">${esc(mod.summary)}</p>`:''}<div class="rich-text">${richText(mod.description)||'<p>No description provided. Open the mod on Nexus for more information.</p>'}</div><div style="margin-top:22px"><button class="button small" data-open-mod="true">Open on Nexus ${icon('arrow')}</button><button class="text-button remove-mod-link" data-remove-mod="${esc(modKey(mod))}">Remove from local library</button></div>`;
@@ -213,8 +235,8 @@
       const groups=new Map();detail.files.forEach(f=>{const group=categoryName(f);if(!groups.has(group))groups.set(group,[]);groups.get(group).push(f);});
       const order=['Main files','Updates','Optional files','Miscellaneous','Other files','Old versions'];
       const sorted=[...groups].sort((a,b)=>(order.indexOf(a[0])<0?99:order.indexOf(a[0]))-(order.indexOf(b[0])<0?99:order.indexOf(b[0])));
-      el.innerHTML=`<div class="details-note">${icon('info')}<span>Choose the exact files you need. Check the changelog, requirements, and each file’s instructions before installing. Get this file handles Nexus’s free-download steps automatically. Sign in or complete a browser check if prompted.</span></div><div class="files-toolbar"><p><span id="selected-files-count">${selectedFiles.size}</span> files selected</p><button class="button primary small" id="download-selected" ${selectedFiles.size?'':'disabled'}>${icon('download')}Download selected</button></div>`+
-        sorted.map(([group,files])=>`<section class="file-group"><h3>${esc(group)}<span>${files.length}</span></h3>${files.map(f=>{const id=fileId(f),selected=selectedFiles.has(id);return `<article class="file-card ${selected?'selected':''}" data-file-card="${id}"><label class="file-card-head"><input type="checkbox" data-select-file="${id}" ${selected?'checked':''} aria-label="Select ${esc(f.name)}"><span class="file-card-title"><strong>${esc(f.name)}</strong><span class="file-card-meta"><span class="version-chip">${esc(f.version||'—')}</span><span>${esc(date(f.uploadedAt??f.uploaded_timestamp??f.uploaded_time,true))}</span><span>${bytes(f.size??f.size_in_bytes??Number(f.size_kb||0)*1024)}</span>${f.downloadedAt?`<span>Downloaded ${esc(date(f.downloadedAt))}</span>`:''}</span></span></label><div class="file-card-body"><div class="rich-text">${richText(f.description)||'<span>No file description provided.</span>'}</div><div class="file-card-actions"><small>${f.downloadedAt?'Previously downloaded':'Review this file before installing'}</small><button class="button small file-download" data-download-file="${id}">${icon('download')}Get this file</button></div></div></article>`;}).join('')}</section>`).join('')+(!detail.files.length?'<p class="subtle-empty">No downloadable files are currently available for this mod.</p>':'');
+      el.innerHTML=`<div class="details-note">${icon('info')}<span>Choose the exact files you need. Check the changelog, requirements, and each file’s instructions before installing. Get this file handles Nexus’s free-download steps automatically. Sign in or complete a browser check if prompted.</span></div><p class="file-history-note">Flags track exact files, not installed mods. Older downloads without file-level history show “No download recorded.”</p><div class="files-toolbar"><p><span id="selected-files-count">${selectedFiles.size}</span> files selected</p><button class="button primary small" id="download-selected" ${selectedFiles.size?'':'disabled'}>${icon('download')}Download selected</button></div>`+
+        sorted.map(([group,files])=>`<section class="file-group"><h3>${esc(group)}<span>${files.length}</span></h3>${files.map(f=>{const id=fileId(f),selected=selectedFiles.has(id),at=fileDownloadedAt(f);return `<article class="file-card ${selected?'selected':''}" data-file-card="${id}" data-downloaded-at="${at}"><label class="file-card-head"><input type="checkbox" data-select-file="${id}" ${selected?'checked':''} aria-label="Select ${esc(f.name)}"><span class="file-card-title"><span class="file-title-row"><strong>${esc(f.name)}</strong><span class="file-download-flag ${at?'downloaded':''}" title="${at?'This exact file has a recorded download. Installation is manual.':'No download date is available for this exact file.'}">${fileDownloadFlag(at)}</span></span><span class="file-card-meta"><span class="version-chip">${esc(f.version||'—')}</span><span>${esc(date(f.uploadedAt??f.uploaded_timestamp??f.uploaded_time,true))}</span><span>${bytes(f.size??f.size_in_bytes??Number(f.size_kb||0)*1024)}</span><span class="file-downloaded-date ${at?'':'hidden'}">${at?`Last downloaded ${esc(date(at,true))}`:''}</span></span></span></label><div class="file-card-body"><div class="rich-text">${richText(f.description)||'<span>No file description provided.</span>'}</div><div class="file-card-actions"><small>Review this file before installing</small><button class="button small file-download" data-download-file="${id}">${icon('download')}Get this file</button></div></div></article>`;}).join('')}</section>`).join('')+(!detail.files.length?'<p class="subtle-empty">No downloadable files are currently available for this mod.</p>':'');
     }
     if(detailTab==='changelog'){
       const entries=Array.isArray(detail.changelogs)?detail.changelogs.map(c=>[c.version??c.name??'Update',c.changes??c.changelog??c.description??c.text]):Object.entries(detail.changelogs||{});

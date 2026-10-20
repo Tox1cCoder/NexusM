@@ -23,14 +23,20 @@
       {gameDomain:'removedgame',modId:4,name:'Preserved old-game history',author:'Dave',version:'1.0',updatedAt:1792600000,lastDownloadedAt:1792100000,needsReview:true}
     ],
     downloads:[{id:'interrupted-fixture',gameDomain:'game1',modId:1,fileId:10,name:'Interrupted archive',status:'interrupted',error:'The app closed before this download finished.'}],
+    fileDownloads:{
+      'game1:1:12':{gameDomain:'game1',modId:1,fileId:12,status:'completed',downloadedAt:1792480000},
+      'game1:1:11':{gameDomain:'game1',modId:1,fileId:11,status:'failed',downloadedAt:1792480000},
+      'game1:2:11':{gameDomain:'game1',modId:2,fileId:11,status:'completed',downloadedAt:1792480000},
+      'game2:1:11':{gameDomain:'game2',modId:1,fileId:11,status:'completed',downloadedAt:1792480000}
+    },
     settings:{hasApiKey:true,downloadFolder:'C:\\Downloads\\NexusM',yourGamesOnly:true},
     user:{name:'UI fixture',isPremium:false},lastCheckedAt:1792500000,refreshProgress:{running:false}
   };
   const fakeDetails = {
     mod:{...fixture.mods[0],summary:'Safe summary',description:'<p>Keep <strong>author instructions</strong>.</p><script>window.__uiInjected=true</script><img src="javascript:window.__uiInjected=true" onerror="window.__uiInjected=true"><a href="javascript:window.__uiInjected=true">Unsafe link</a><iframe src="https://untrusted.example"></iframe><a href="https://www.nexusmods.com/game1/mods/1">Safe link</a>'},
     files:[
-      {fileId:10,name:'Main regular',category:'MAIN',version:'2.0',size:4096,uploadedAt:1792450000,description:'[b]Clean install required[/b]'},
-      {fileId:11,name:'Main alternative',category:'MAIN',version:'2.0',size:8192,uploadedAt:1792450000,description:'[url=javascript:alert(1)]Bad link[/url]'},
+      {fileId:10,name:'Main regular',category:'MAIN',version:'2.0',size:4096,uploadedAt:1792450000,downloadedAt:1792470000,description:'[b]Clean install required[/b]'},
+      {fileId:11,name:'Main alternative',category:'MAIN',version:'2.0',size:8192,uploadedAt:1792450000,downloadedAt:0,description:'[url=javascript:alert(1)]Bad link[/url]'},
       {fileId:12,name:'Optional translation',category:'OPTIONAL',version:'1.1',size:2048,uploadedAt:1792400000,description:'[i]Requires the main file[/i]'}
     ],
     changelogs:{'2.0':['Fixes [b]a bug[/b]','New dependency']},
@@ -47,7 +53,7 @@
         originalPost.call(bridge,{id,action:'getState',payload:{}});
       });
       bridge.postMessage=function(message){
-        if(message.action==='getModDetails')queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:fakeDetails}));
+        if(message.action==='getModDetails'){requests.push(message);queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:fakeDetails}));}
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
@@ -110,6 +116,30 @@
         expect($('#mark-reviewed-button'),'Mark reviewed control is missing.');
         $('[data-select-file="10"]').click();$('[data-select-file="12"]').click();
         expect($('#selected-files-count').textContent==='2'&&!$('#download-selected').disabled,'Multiple file selection did not update.');
+      });
+      await check('downloaded flags identify exact main and optional files',()=>{
+        expect($('[data-file-card="10"] .file-download-flag.downloaded')?.textContent==='Downloaded','The downloaded main file needs a visible check flag.');
+        expect($('[data-file-card="12"] .file-download-flag.downloaded')?.textContent==='Downloaded','An optional file from persistent file history should be flagged.');
+        expect($('[data-file-card="11"] .file-download-flag')?.textContent==='No download recorded','Mod-level dates, failed records, and matching IDs from other mods or games must not flag this alternative.');
+        expect($('[data-file-card="10"] .file-downloaded-date').textContent.startsWith('Last downloaded '),'The exact file download date is missing.');
+        expect($('.file-history-note').textContent.includes('Older downloads without file-level history'),'Unknown historical file downloads need an explanation.');
+      });
+      await check('completed downloads update open file flags without losing selection or fetching details',()=>{
+        const input=$('[data-select-file="12"]'),detailsRequests=requests.filter(r=>r.action==='getModDetails').length;
+        input.focus();
+        const record={id:'game1:1:11',gameDomain:'game1',modId:1,fileId:11,name:'Main alternative',downloadedAt:1792600000};
+        window.NexusM.receive({event:'download',data:{...record,status:'failed'}});
+        expect(!$('[data-file-card="11"] .file-download-flag').classList.contains('downloaded'),'An unsuccessful transfer must not receive a downloaded flag.');
+        window.NexusM.receive({event:'download',data:{...record,status:'completed',downloadedAt:0}});
+        expect(!$('[data-file-card="11"] .file-download-flag').classList.contains('downloaded'),'A missing download date must not turn into a year-2000 downloaded flag.');
+        window.NexusM.receive({event:'download',data:{...record,status:'completed'}});
+        expect($('[data-file-card="11"] .file-download-flag.downloaded')?.textContent==='Downloaded','Completing a transfer should immediately flag the open file.');
+        expect($('[data-select-file="12"]')===input&&document.activeElement===input,'Updating a flag must preserve the focused checkbox.');
+        expect(input.checked&&$('[data-select-file="10"]').checked&&$('#selected-files-count').textContent==='2','Updating a flag must retain selected files.');
+        expect(requests.filter(r=>r.action==='getModDetails').length===detailsRequests,'A completed flag should not fetch the mod details again.');
+        window.NexusM.setState({fileDownloads:{...fixture.fileDownloads,'game1:1:11':{...record,status:'completed'}},downloads:[]});
+        expect($('[data-file-card="11"] .file-download-flag.downloaded'),'Clearing the visible list must keep the persisted file flag.');
+        window.NexusM.setState({fileDownloads:fixture.fileDownloads,downloads:fixture.downloads});
       });
       await check('Get this file prepares a download with one click',async()=>{
         expect($('#detail-tab-body .details-note').textContent.includes('free-download steps automatically'),'File instructions should describe automatic preparation.');
