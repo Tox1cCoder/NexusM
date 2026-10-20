@@ -8,7 +8,7 @@ $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $framework = Split-Path $compiler
 $executable = Join-Path $output 'RefreshTests.exe'
 $arguments = @('/nologo', '/target:winexe', '/platform:x64', '/langversion:5', '/main:NexusM.RefreshTests', ('/out:' + $executable))
-foreach ($assembly in @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Net.Http.dll','System.Web.dll','System.Web.Extensions.dll','System.Security.dll','System.Xml.dll')) {
+foreach ($assembly in @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Net.Http.dll','System.Web.dll','System.Web.Extensions.dll','System.Security.dll','System.Xml.dll','Microsoft.VisualBasic.dll')) {
     $arguments += '/reference:' + (Join-Path $framework $assembly)
 }
 foreach ($assembly in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.WinForms.dll')) {

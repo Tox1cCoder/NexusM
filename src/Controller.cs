@@ -14,11 +14,11 @@ namespace NexusM
     {
         internal readonly Storage Store;
         internal NexusApi Api;
-        internal bool HasActiveTransfers { get { return transfers.Count > 0; } }
+        internal bool HasActiveTransfers { get { return transfers.Count > 0 || clearingDownloadFolder; } }
         private DownloadService downloader;
         private readonly MainForm window;
         private bool initialized;
-        private bool disposed;
+        private bool disposed, clearingDownloadFolder;
         private Task initializationTask, refreshTask;
         private readonly CancellationTokenSource lifetime = new CancellationTokenSource();
         private List<object> catalogue;
@@ -39,6 +39,7 @@ namespace NexusM
             if (action == "getState") return Store.PublicState();
             if (action == "initialize") { await Initialize(); return Store.PublicState(); }
             if (action == "saveSettings") {
+                if (p.ContainsKey("downloadFolder")) RequireFolderAvailable();
                 if (p.ContainsKey("yourGamesOnly") && !(p["yourGamesOnly"] is bool)) throw new ArgumentException("Your games filter must be enabled or disabled.");
                 if (p.ContainsKey("apiKey") && !String.IsNullOrWhiteSpace(Data.Str(p, "apiKey"))) {
                     if (transfers.Count > 0) throw new InvalidOperationException("Finish or cancel active downloads before changing your API key.");
@@ -48,13 +49,14 @@ namespace NexusM
                     if (refreshTask != null) await refreshTask;
                     Store.WriteKey(key); ResetApi(); initialized = false; initializationTask = null; await Connect();
                 }
-                if (p.ContainsKey("downloadFolder")) { string folder = Path.GetFullPath(Data.Str(p, "downloadFolder")); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
+                if (p.ContainsKey("downloadFolder")) { RequireFolderAvailable(); string folder = Path.GetFullPath(Data.Str(p, "downloadFolder")); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
                 if (p.ContainsKey("yourGamesOnly")) Store.Settings["yourGamesOnly"] = (bool)p["yourGamesOnly"];
                 Store.Save(); Emit(); return Store.PublicState();
             }
             if (action == "browseFolder") {
+                RequireFolderAvailable();
                 using (var dialog = new FolderBrowserDialog { Description = "Choose where NexusM saves mod archives", SelectedPath = Folder, ShowNewFolderButton = true }) {
-                    if (dialog.ShowDialog(window) == DialogResult.OK) { Store.Settings["downloadFolder"] = dialog.SelectedPath; Store.Save(); Emit(); }
+                    if (dialog.ShowDialog(window) == DialogResult.OK) { RequireFolderAvailable(); Store.Settings["downloadFolder"] = dialog.SelectedPath; Store.Save(); Emit(); }
                 }
                 return Store.PublicState();
             }
@@ -98,7 +100,9 @@ namespace NexusM
                 foreach (var row in removable) window.CancelAuthorization(Data.Str(row, "id"));
                 Store.Save(); Emit(); return Store.PublicState();
             }
+            if (action == "clearDownloadFolder") return ClearDownloadFolder();
             if (action == "retryDownload") {
+                RequireFolderAvailable();
                 var row = Store.Downloads.FirstOrDefault(x => Data.Str(x, "id") == Data.Str(p, "id"));
                 if (row == null) throw new ArgumentException("That download is no longer in the queue.");
                 await AuthorizeDownload(Data.Str(row, "gameDomain"), Data.Num(row, "modId"), Data.Num(row, "fileId")); return Store.PublicState();
@@ -123,6 +127,43 @@ namespace NexusM
             throw new ArgumentException("Unknown app action: " + action);
         }
         private string Folder { get { return Data.Str(Store.Settings, "downloadFolder"); } }
+        private void RequireFolderAvailable() {
+            if (clearingDownloadFolder) throw new InvalidOperationException("Wait for download folder cleanup to finish.");
+        }
+        private void RequireIdleDownloads() {
+            var finished = new HashSet<string>(new[] { "completed", "failed", "cancelled", "canceled", "interrupted" });
+            if (transfers.Count > 0 || pending.Count > 0 || Store.Downloads.Any(x => !finished.Contains(Data.Str(x, "status"))))
+                throw new InvalidOperationException("Finish or cancel pending downloads before clearing the download folder.");
+        }
+        internal object ClearDownloadFolder(Func<DownloadFolderPlan, bool> confirm = null, Action<string> recycle = null) {
+            RequireFolderAvailable(); RequireIdleDownloads();
+            var plan = DownloadFolderCleanup.Prepare(Folder, new[] { Store.Root, AppDomain.CurrentDomain.BaseDirectory });
+            if (plan.Files.Count == 0) {
+                Store.State["notice"] = "There are no files to clear in the download folder. Subfolders were kept.";
+                Store.Save(); Emit(); return Store.PublicState();
+            }
+            clearingDownloadFolder = true; Store.State["clearingDownloadFolder"] = true; Emit();
+            try {
+                bool approved = confirm != null ? confirm(plan) : MessageBox.Show(window,
+                    "Move " + plan.Files.Count + " files from this folder to the Recycle Bin?\n\n" + plan.Folder +
+                    "\n\nThis includes downloaded archives, unfinished downloads, and other files directly in this folder. Subfolders and your download history will be kept.",
+                    "Clear download folder", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                if (!approved) return Store.PublicState();
+                if (disposed) throw new OperationCanceledException();
+                RequireIdleDownloads();
+                var result = DownloadFolderCleanup.Recycle(plan, recycle);
+                Store.State["notice"] = "Moved " + result.Moved + " files to the Recycle Bin." +
+                    (result.Cancelled ? " Cleanup was cancelled." : "") +
+                    (result.Failed > 0 ? " " + result.Failed + " files could not be moved." : "") +
+                    (result.Skipped > 0 ? " " + result.Skipped + " files were skipped." : "") +
+                    " Subfolders and download history were kept.";
+                return Store.PublicState();
+            }
+            finally {
+                clearingDownloadFolder = false; Store.State.Remove("clearingDownloadFolder");
+                if (!disposed) { Store.Save(); Emit(); window.NextAuthorization(); }
+            }
+        }
         private Task Initialize() {
             if (Api == null) return Task.FromResult(0);
             if (initialized) return initializationTask ?? Task.FromResult(0);
@@ -398,10 +439,11 @@ namespace NexusM
             Store.State["notice"] = "Imported " + imported.Count + " mod links. This text did not include reliable download dates; use the Nexus history importer to preserve them."; Store.Save();
         }
         private async Task AuthorizeDownload(string domain, long modId, long fileId) {
-            RequireApi(); domain = JsonTools.Domain(domain); if (modId <= 0 || fileId <= 0) throw new ArgumentException("Choose a mod file first.");
+            RequireFolderAvailable(); RequireApi(); domain = JsonTools.Domain(domain); if (modId <= 0 || fileId <= 0) throw new ArgumentException("Choose a mod file first.");
             string id = domain + ":" + modId + ":" + fileId;
             if (transfers.ContainsKey(id)) throw new InvalidOperationException("This file is already downloading.");
             var detail = await Details(domain, modId);
+            RequireFolderAvailable();
             var file = Data.List(Data.Get(detail, "files")).FirstOrDefault(x => Data.Num(x, "fileId") == fileId);
             if (file == null) throw new ArgumentException("This file is no longer listed by Nexus.");
             if (Data.Str(file, "category").Equals("ARCHIVED", StringComparison.OrdinalIgnoreCase) || Data.Str(file, "category").Equals("DELETED", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("This file is unavailable. Choose an active file or open its Nexus page.");
@@ -411,7 +453,7 @@ namespace NexusM
             window.OpenAuthorization("https://www.nexusmods.com/" + domain + "/mods/" + modId + "?tab=files&file_id=" + fileId + "&nmm=1", id);
         }
         internal async Task ReceiveNxm(string uri) {
-            RequireApi(); var request = DownloadRequest.ParseNxm(uri, Folder); string id = request.Id;
+            RequireFolderAvailable(); RequireApi(); var request = DownloadRequest.ParseNxm(uri, Folder); string id = request.Id;
             if (transfers.ContainsKey(id)) return;
             Directory.CreateDirectory(Folder);
             var cancellation = new CancellationTokenSource(); transfers[id] = cancellation; pending.Remove(id);

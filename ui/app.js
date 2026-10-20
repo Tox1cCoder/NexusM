@@ -54,7 +54,7 @@
     if(button){button.disabled=true;button.classList.add('busy');}
     try {const result=await rpc(action,payload);consume(result);if(success)toast(success);return result;}
     catch(error){toast(error.message,true);return null;}
-    finally{if(button){button.disabled=false;button.classList.remove('busy');}}
+    finally{if(button){button.disabled=false;button.classList.remove('busy');}renderDownloadControls();}
   }
   function renderRefresh(){
     const progress=state.refreshProgress||{},running=progress.running===true||!!refreshPromise;
@@ -156,6 +156,14 @@
       const labels={queued:'Queued',authorizing:'Authorizing',retrying:'Resuming',downloading:'Downloading',completed:'Downloaded',failed:'Failed',cancelled:'Cancelled',canceled:'Cancelled',interrupted:'Interrupted'};
       return `<article class="download-card"><div class="download-icon">${icon(done?'check':'download')}</div><div class="download-info"><h3>${esc(d.name??d.fileName??d.filename??'Mod archive')}</h3><div class="download-meta">${esc(d.fileName??d.filename??gameName(d.gameDomain))}${total?` · ${bytes(current)} / ${bytes(total)}`:''}${d.speed?` · ${bytes(d.speed)}/s`:''}${waiting&&d.authorizationMessage?`<br><span>${esc(d.authorizationMessage)}</span>`:''}${d.error?`<br><span class="download-error">${esc(d.error)}</span>`:''}</div>${status==='downloading'?`<div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${percent}%"></span></div>`:''}</div><span class="download-status ${done?'completed':''}">${esc(waiting?(d.needsUser?'Nexus needs attention':'Preparing download'):labels[status]||status)}</span><div class="download-actions">${done?`<button class="icon-button" data-download-folder="${esc(d.id)}" aria-label="Open download folder" title="Open download folder">${icon('folder')}</button>`:failed?`<button class="button small" data-retry-download="${esc(d.id)}">Retry</button>`:`${waiting?`<button class="button small" data-retry-download="${esc(d.id)}">Open Nexus</button>`:''}<button class="icon-button" data-cancel-download="${esc(d.id)}" aria-label="Cancel download" title="Cancel download">${icon('close')}</button>`}</div></article>`;
     }).join(''):`<div class="empty-state"><div class="empty-symbol">${icon('download')}</div><h3>A good place for your next update.</h3><p>Open a mod in your library and choose the files you want.<br>Your downloads will appear here.</p><div class="empty-actions"><button class="button" data-page="library">Back to my library</button></div></div>`;
+    renderDownloadControls();
+  }
+  function renderDownloadControls(){
+    const clearing=state.clearingDownloadFolder===true;
+    const active=state.downloads.some(d=>['queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization'].includes(d.status||'queued'));
+    const clear=$('#clear-download-folder-button');
+    clear.disabled=clearing||active||clear.classList.contains('busy');clear.setAttribute('aria-busy',String(clearing||clear.classList.contains('busy')));
+    for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||(button.id==='download-selected'&&selectedFiles.size===0);
   }
   function renderSettings(){
     const connected=!!(state.user || state.settings.hasApiKey);
@@ -164,6 +172,7 @@
     $('#key-help').textContent='Stored locally on this computer. Never included in exports.';
     $('#download-folder').value=state.settings.downloadFolder??'';
     if($('#cache-size'))$('#cache-size').textContent=state.settings.cacheSizeMB!=null?`${Number(state.settings.cacheSizeMB).toFixed(1)} MB cached. Images can be fetched again.`:'Images can be fetched again when you open the app.';
+    renderDownloadControls();
   }
 
   // Convert common Nexus BBCode, then allow only harmless markup and web links.
@@ -246,9 +255,10 @@
       const requirements=Array.isArray(detail.requirements)?detail.requirements:[];
       el.innerHTML=`<div class="details-note">${icon('info')}<span>${esc(detail.requirementsNotice||'Requirements may also be described in the overview, file notes, or pinned comments. Read the author’s instructions for the complete installation steps.')}</span></div>`+requirements.map(r=>`<article class="requirement-card"><div><strong>${esc(r.name??r.modName??'Requirement')}</strong>${r.notes?`<div class="rich-text">${richText(r.notes)}</div>`:''}</div>${imageUrl(r.url)?`<button class="icon-button" data-open-url="${esc(r.url)}" aria-label="Open requirement on Nexus">${icon('arrow')}</button>`:''}</article>`).join('')+(!requirements.length?'<p class="subtle-empty">No structured requirements are available. This doesn’t confirm the mod has no dependencies.</p>':'')+'<button class="button small" data-open-mod="true">Check requirements on Nexus '+icon('arrow')+'</button>';
     }
+    renderDownloadControls();
   }
   async function downloadFile(id,button){if(!detail)return;const result=await run('startDownload',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod),fileId:Number(id)},button);if(result!==null)toast('Preparing your download…');}
-  async function downloadSelected(button){const ids=[...selectedFiles];if(!ids.length)return;button.disabled=true;let added=0;for(const id of ids){if(!detail)break;const result=await run('startDownload',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod),fileId:id});if(result!==null){added++;selectedFiles.delete(id);}}if(detail)renderDetailTab();if(added)toast(`Added ${added} ${added===1?'file':'files'} to the download queue.`);}
+  async function downloadSelected(button){const ids=[...selectedFiles];if(!ids.length)return;button.disabled=true;button.classList.add('busy');let added=0;try{for(const id of ids){if(!detail)break;const result=await run('startDownload',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod),fileId:id});if(result!==null){added++;selectedFiles.delete(id);}}if(detail)renderDetailTab();if(added)toast(`Added ${added} ${added===1?'file':'files'} to the download queue.`);}finally{button.classList.remove('busy');renderDownloadControls();}}
 
   function showDialog(config){
     modalConfig=config;$('#dialog-title').textContent=config.title;$('#dialog-description').textContent=config.description||'';$('#dialog-body').innerHTML=config.body;$('#dialog-submit').textContent=config.submit||'Save';$('#dialog-submit').disabled=false;$('#dialog-error').classList.add('hidden');$('#input-dialog').showModal();
@@ -287,6 +297,7 @@
       'detail-close':closeDetail,'detail-external':()=>detail&&openUrl(modUrl(detail.mod)),
       'downloads-folder':()=>run('openFolder'),'settings-open-folder':()=>run('openFolder'),
       'clear-downloads-button':async()=>{await run('clearDownloads',{},target);renderDownloads();},
+      'clear-download-folder-button':()=>run('clearDownloadFolder',{},target),
       'your-games-only':()=>run('saveSettings',{yourGamesOnly:state.settings.yourGamesOnly===false},target),
       'toggle-key':()=>{const input=$('#api-key');input.type=input.type==='password'?'text':'password';target.textContent=input.type==='password'?'Show':'Hide';},
       'save-key-button':async()=>{const apiKey=$('#api-key').value.trim();if(!apiKey){toast('Paste your personal Nexus API key first.',true);return;}const result=await run('saveSettings',{apiKey},target);if(result!==null){$('#api-key').value='';$('#api-key').type='password';$('#toggle-key').textContent='Show';toast('Connected to Nexus Mods.');await checkUpdates('initialize');}},
@@ -305,7 +316,7 @@
   });
   document.addEventListener('change',async e=>{
     const input=e.target;
-    if(input.dataset.selectFile){const id=Number(input.dataset.selectFile);input.checked?selectedFiles.add(id):selectedFiles.delete(id);input.closest('.file-card').classList.toggle('selected',input.checked);$('#selected-files-count').textContent=selectedFiles.size;$('#download-selected').disabled=selectedFiles.size===0;}
+    if(input.dataset.selectFile){const id=Number(input.dataset.selectFile);input.checked?selectedFiles.add(id):selectedFiles.delete(id);input.closest('.file-card').classList.toggle('selected',input.checked);$('#selected-files-count').textContent=selectedFiles.size;renderDownloadControls();}
     if(input.id==='dialog-file'&&input.files?.[0]){try{const file=input.files[0];if(file.size>30*1024*1024)throw new Error('Choose a history or backup file smaller than 30 MB.');$('#dialog-value').value=await file.text();}catch(error){toast(error.message,true);}}
   });
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('#input-dialog').open)closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('#input-dialog').open){const focusable=$$('button:not([disabled]),input,a[href],select,textarea', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});

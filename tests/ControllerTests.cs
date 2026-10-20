@@ -37,6 +37,11 @@ namespace NexusM
                 Check("clearing downloads preserves the newest successful file history, including legacy queue-only rows", TestClearDownloadHistory);
                 Check("clearing an empty download list is safe and idempotent", TestClearEmptyDownloads);
                 Check("Your games filter defaults on, persists boolean changes, and rejects malformed payloads safely", TestYourGamesSetting);
+                Check("clearing the download folder confirms the exact files and retains subfolders and all download history", TestClearDownloadFolder);
+                Check("cancelled or empty folder cleanup leaves files and history untouched", TestCancelDownloadFolderCleanup);
+                Check("folder cleanup refuses active transfers and pending authorizations before confirmation", TestDownloadFolderActiveGuards);
+                Check("folder cleanup blocks reentrant cleanup, folder changes, and new downloads before API access", TestDownloadFolderBusyGuards);
+                Check("folder cleanup resets its busy state after confirmation exceptions and partial recycle failures", TestDownloadFolderFailureRecovery);
             }
             catch (Exception error) { Checks.Add(Data.Obj("name", "Harness failure", "passed", false, "error", error.ToString())); }
             finally
@@ -372,6 +377,173 @@ namespace NexusM
             File.WriteAllText(Path.Combine(malformedFolder, "state.json"), "{\"settings\":{\"yourGamesOnly\":\"false\"}}");
             Storage recovered = new Storage(malformedFolder);
             Expect(Data.Get(recovered.Settings, "yourGamesOnly") is bool && Data.Bool(recovered.Settings, "yourGamesOnly"), "A malformed disk setting did not recover the default filter.");
+        }
+
+        private static string CleanupFolder(Storage storage, string suffix)
+        {
+            string folder = Path.Combine(root, Path.GetFileName(storage.Root) + "-" + suffix);
+            Directory.CreateDirectory(folder);
+            storage.Settings["downloadFolder"] = folder;
+            return folder;
+        }
+
+        private static void ExpectCleanupRejected(Action action, string reason)
+        {
+            bool rejected = false;
+            try { action(); }
+            catch (InvalidOperationException error)
+            {
+                rejected = true;
+                Expect(error.Message.IndexOf("API key", StringComparison.OrdinalIgnoreCase) < 0, reason + " reached the API requirement before the cleanup guard.");
+            }
+            Expect(rejected, reason + " was not rejected.");
+        }
+
+        private static void TestClearDownloadFolder()
+        {
+            Storage storage = NewStore("clear-folder");
+            string folder = CleanupFolder(storage, "archives"), recycled = Path.Combine(root, "clear-folder-recycled");
+            Directory.CreateDirectory(recycled);
+            string archive = Path.Combine(folder, "main.zip"), partial = Path.Combine(folder, "optional.zip.part"), sidecar = Path.Combine(folder, "main.zip.nexusm.json");
+            File.WriteAllText(archive, "fixture archive"); File.WriteAllText(partial, "fixture partial"); File.WriteAllText(sidecar, "fixture sidecar");
+            string nested = Path.Combine(folder, "keep-subfolder"); Directory.CreateDirectory(nested);
+            string nestedFile = Path.Combine(nested, "keep.zip"); File.WriteAllText(nestedFile, "nested fixture");
+            storage.Mods.Add(Data.Obj("gameDomain", "baldursgate3", "modId", 5508, "lastDownloadedAt", 1792100000, "reviewedAt", 1792000000, "needsReview", true));
+            storage.Downloads.Add(Download(42, "completed", 1792200000, "2.2.3"));
+            storage.Downloads.Add(Download(99, "failed", 0, "2.2.1"));
+            storage.State["fileDownloads"] = Data.Obj("baldursgate3:5508:42", Download(42, "completed", 1792200000, "2.2.3"));
+            string modsBefore = Data.Json.Serialize(storage.Mods), queueBefore = Data.Json.Serialize(storage.Downloads), filesBefore = Data.Json.Serialize(Data.Get(storage.State, "fileDownloads"));
+            WithController(storage, delegate(Controller controller)
+            {
+                int confirmations = 0, moved = 0;
+                object result = controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan)
+                {
+                    confirmations++;
+                    Expect(Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup was not busy during its confirmation callback.");
+                    Expect(String.Equals(plan.Folder, Path.GetFullPath(folder), StringComparison.OrdinalIgnoreCase), "Confirmation received a different download folder.");
+                    Expect(plan.Files.Count == 3 && plan.Files.OrderBy(x => x).SequenceEqual(new[] { archive, partial, sidecar }.OrderBy(x => x)), "Confirmation did not contain exactly the direct files.");
+                    Expect(plan.Files.IsReadOnly, "The confirmed file list should be read-only.");
+                    return true;
+                }, delegate(string path)
+                {
+                    Expect(Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup stopped being busy before file recycling completed.");
+                    File.Move(path, Path.Combine(recycled, Path.GetFileName(path))); moved++;
+                });
+                Expect(confirmations == 1 && moved == 3, "Confirmed cleanup did not process every direct file exactly once.");
+                Expect(Directory.Exists(folder) && Directory.GetFiles(folder).Length == 0, "Cleanup removed the folder or left direct files behind.");
+                Expect(File.ReadAllText(nestedFile) == "nested fixture", "Cleanup changed a subfolder's contents.");
+                Expect(Directory.GetFiles(recycled).Length == 3, "Fixture recycle destination did not retain the files.");
+                Expect(!Data.Bool(storage.State, "clearingDownloadFolder") && !Data.Bool(result, "clearingDownloadFolder"), "Successful cleanup retained the busy state.");
+                Expect(Data.Json.Serialize(storage.Mods) == modsBefore && Data.Json.Serialize(storage.Downloads) == queueBefore && Data.Json.Serialize(Data.Get(storage.State, "fileDownloads")) == filesBefore,
+                    "Folder cleanup changed the queue, per-file flags, or mod dates and review state.");
+            });
+            Storage reopened = new Storage(storage.Root);
+            Expect(Data.Json.Serialize(reopened.Mods) == modsBefore && Data.Json.Serialize(reopened.Downloads) == queueBefore && Data.Json.Serialize(Data.Get(reopened.State, "fileDownloads")) == filesBefore,
+                "Folder cleanup failed to retain the library and successful file history after restart.");
+        }
+
+        private static void TestCancelDownloadFolderCleanup()
+        {
+            Storage storage = NewStore("cancel-clear-folder");
+            string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "keep.zip");
+            File.WriteAllText(archive, "keep fixture");
+            WithController(storage, delegate(Controller controller)
+            {
+                int confirmations = 0, recycles = 0;
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmations++; return false; }, delegate(string path) { recycles++; });
+                Expect(confirmations == 1 && recycles == 0 && File.ReadAllText(archive) == "keep fixture", "Declining cleanup changed a file.");
+                Expect(!Data.Bool(storage.State, "clearingDownloadFolder"), "Declined cleanup retained the busy state.");
+                storage.Settings["downloadFolder"] = CleanupFolder(storage, "empty");
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmations++; return true; }, delegate(string path) { recycles++; });
+                Expect(confirmations == 1 && recycles == 0, "An empty download folder prompted for confirmation or recycled a file.");
+                Expect(!Data.Bool(storage.State, "clearingDownloadFolder"), "Empty cleanup retained the busy state.");
+            });
+        }
+
+        private static void TestDownloadFolderActiveGuards()
+        {
+            Storage storage = NewStore("guard-clear-folder");
+            string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "keep.zip");
+            File.WriteAllText(archive, "keep fixture");
+            WithController(storage, delegate(Controller controller)
+            {
+                int confirmations = 0, recycles = 0;
+                Func<DownloadFolderPlan, bool> confirm = delegate(DownloadFolderPlan plan) { confirmations++; return true; };
+                Action<string> recycle = delegate(string path) { recycles++; };
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                var pending = (HashSet<string>)typeof(Controller).GetField("pending", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                using (var active = new CancellationTokenSource())
+                {
+                    transfers["unlisted-transfer"] = active;
+                    ExpectCleanupRejected(delegate { controller.ClearDownloadFolder(confirm, recycle); }, "A transfer missing from the visible queue");
+                    Expect(!active.IsCancellationRequested, "Folder cleanup cancelled an active transfer.");
+                    transfers.Remove("unlisted-transfer");
+                }
+                pending.Add("unlisted-authorization");
+                ExpectCleanupRejected(delegate { controller.ClearDownloadFolder(confirm, recycle); }, "A pending authorization missing from the visible queue");
+                pending.Clear();
+                foreach (string status in new[] { "queued", "authorizing", "waiting-authorization", "retrying", "downloading" })
+                {
+                    storage.Downloads.Add(Download(42, status, 0, "2.2.3"));
+                    ExpectCleanupRejected(delegate { controller.ClearDownloadFolder(confirm, recycle); }, "The " + status + " queue entry");
+                    Expect(Data.Str(storage.Downloads[0], "status") == status, "Cleanup changed a guarded download status.");
+                    storage.Downloads.Clear();
+                }
+                Expect(confirmations == 0 && recycles == 0 && File.ReadAllText(archive) == "keep fixture", "Guarded cleanup reached confirmation or changed a file.");
+                Expect(!Data.Bool(storage.State, "clearingDownloadFolder"), "Rejected cleanup retained the busy state.");
+            });
+        }
+
+        private static void TestDownloadFolderBusyGuards()
+        {
+            Storage storage = NewStore("busy-clear-folder");
+            string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "keep.zip"), alternative = Path.Combine(root, "busy-clear-folder-uncreated");
+            File.WriteAllText(archive, "keep fixture");
+            WithController(storage, delegate(Controller controller)
+            {
+                int recycled = 0;
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan)
+                {
+                    Expect(Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup was not busy inside its confirmation callback.");
+                    ExpectCleanupRejected(delegate { controller.ClearDownloadFolder(delegate(DownloadFolderPlan nested) { throw new Exception("Nested cleanup reached confirmation."); }); }, "Nested folder cleanup");
+                    ExpectCleanupRejected(delegate { controller.Handle("saveSettings", Data.Obj("downloadFolder", alternative)).GetAwaiter().GetResult(); }, "Changing the download folder");
+                    ExpectCleanupRejected(delegate { controller.Handle("browseFolder", null).GetAwaiter().GetResult(); }, "Browsing for a new download folder");
+                    ExpectCleanupRejected(delegate { controller.Handle("startDownload", Data.Obj("gameDomain", "baldursgate3", "modId", 5508, "fileId", 42)).GetAwaiter().GetResult(); }, "Starting a new download");
+                    ExpectCleanupRejected(delegate { controller.Handle("retryDownload", Data.Obj("id", "missing-download")).GetAwaiter().GetResult(); }, "Retrying a download");
+                    ExpectCleanupRejected(delegate { controller.ReceiveNxm("nxm://baldursgate3/mods/5508/files/42").GetAwaiter().GetResult(); }, "Receiving a new NXM download");
+                    Expect(Data.Str(storage.Settings, "downloadFolder") == folder && !Directory.Exists(alternative), "Busy folder change altered settings or created the new folder.");
+                    Expect(storage.Downloads.Count == 0 && controller.Api == null, "A blocked download changed the queue or initialized an API client.");
+                    return false;
+                }, delegate(string path) { recycled++; });
+                Expect(recycled == 0 && File.ReadAllText(archive) == "keep fixture" && !Data.Bool(storage.State, "clearingDownloadFolder"), "Reentrant cleanup checks changed a file or left cleanup busy.");
+            });
+        }
+
+        private static void TestDownloadFolderFailureRecovery()
+        {
+            Storage storage = NewStore("failed-clear-folder");
+            string folder = CleanupFolder(storage, "archives"), recycled = Path.Combine(root, "failed-clear-folder-recycled");
+            Directory.CreateDirectory(recycled);
+            string first = Path.Combine(folder, "a-main.zip"), second = Path.Combine(folder, "b-optional.zip");
+            File.WriteAllText(first, "main fixture"); File.WriteAllText(second, "optional fixture");
+            WithController(storage, delegate(Controller controller)
+            {
+                bool threw = false;
+                try { controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { throw new IOException("Fixture confirmation failure"); }, delegate(string path) { throw new Exception("Recycling must not follow a failed confirmation."); }); }
+                catch (IOException) { threw = true; }
+                Expect(threw && !Data.Bool(storage.State, "clearingDownloadFolder") && File.Exists(first) && File.Exists(second), "Confirmation failure changed files or left cleanup busy.");
+                int processed = 0;
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { return true; }, delegate(string path)
+                {
+                    processed++;
+                    if (path == second) throw new IOException("Fixture locked file");
+                    File.Move(path, Path.Combine(recycled, Path.GetFileName(path)));
+                });
+                Expect(processed == 2 && !File.Exists(first) && File.ReadAllText(second) == "optional fixture", "Partial recycling did not retain the failed file and move the successful file.");
+                Expect(!Data.Bool(storage.State, "clearingDownloadFolder"), "Partial recycle failure left cleanup busy.");
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { return true; }, delegate(string path) { File.Move(path, Path.Combine(recycled, Path.GetFileName(path))); });
+                Expect(!File.Exists(second) && !Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup could not run again after a partial failure.");
+            });
         }
 
         private static void AssertNoCredential(string text, string credential, string description)

@@ -50,6 +50,7 @@ namespace NexusM
             }
             State["connected"] = false;
             State.Remove("refreshProgress");
+            State.Remove("clearingDownloadFolder");
         }
         internal List<object> Games { get { return (List<object>)State["games"]; } }
         private static bool RegexPath(string path) { return System.Text.RegularExpressions.Regex.IsMatch(path, @"^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)"); }

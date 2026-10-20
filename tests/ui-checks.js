@@ -7,6 +7,7 @@
   const originalPost = bridge.postMessage;
   let snapshot = null;
   let refreshRequest = null;
+  let folderClearRequest = null;
   const requests = [];
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
   const check = async (name, test) => {
@@ -62,6 +63,10 @@
         else if(message.action==='clearDownloads'){
           requests.push(message);
           queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{downloads:[{id:'active-fixture',gameDomain:'game1',name:'Active archive',status:'downloading',bytes:1024,total:4096},{id:'queued-fixture',gameDomain:'game1',name:'Queued archive',status:'queued'}]}}));
+        }
+        else if(message.action==='clearDownloadFolder'){
+          requests.push(message);folderClearRequest=message;
+          queueMicrotask(()=>window.NexusM.receive({event:'state',data:{clearingDownloadFolder:true}}));
         }
         else if(message.action==='startDownload'){
           requests.push(message);
@@ -189,6 +194,39 @@
         expect($('#clear-downloads-button').disabled,'Clear list should be disabled with only active transfers.');
         expect($('#download-count').textContent==='2','Remaining transfers should still count as active.');
       });
+      await check('Clear download folder waits for idle transfers and remains available with an empty list',()=>{
+        window.NexusM.navigate('downloads');
+        for(const status of ['queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization']){
+          window.NexusM.setState({downloads:[{id:'busy-fixture',status}],clearingDownloadFolder:false});
+          expect($('#clear-download-folder-button').disabled,`Folder cleanup must wait while a transfer is ${status}.`);
+        }
+        window.NexusM.setState({downloads:[],clearingDownloadFolder:false});
+        expect(!$('#clear-download-folder-button').disabled,'Archives can remain on disk after the visible list is cleared.');
+        expect($('#clear-downloads-button').disabled,'An empty list should still disable Clear list.');
+        expect($('#clear-download-folder-button').title.includes('Recycle Bin after confirmation'),'The folder control should describe its confirmation and destination.');
+        expect($('.download-cleanup-note').textContent.includes('Clear list removes entries only'),'The two cleanup actions need a visible distinction.');
+      });
+      await check('folder cleanup dispatches only its action and preserves file flags and history',async()=>{
+        window.NexusM.setState({downloads:[],fileDownloads:fixture.fileDownloads,mods:fixture.mods,clearingDownloadFolder:false});
+        await window.NexusM.showMod('game1:1');$('[data-select-file="10"]').click();
+        const beforeList=requests.filter(r=>r.action==='clearDownloads').length,beforeFolder=requests.filter(r=>r.action==='clearDownloadFolder').length;
+        $('#clear-download-folder-button').click();await settle();
+        expect(requests.filter(r=>r.action==='clearDownloadFolder').length===beforeFolder+1,'Folder cleanup should submit its own host action.');
+        expect(requests.filter(r=>r.action==='clearDownloads').length===beforeList,'Folder cleanup must not clear the visible list.');
+        expect(!$('#input-dialog').open,'The native host handles confirmation; no second app dialog should open.');
+        expect($('#clear-download-folder-button').disabled&&$('#clear-download-folder-button').getAttribute('aria-busy')==='true','The folder button should stay busy until cleanup finishes.');
+        expect($('#browse-folder-button').disabled&&$('#save-folder-button').disabled,'The configured folder must stay fixed during cleanup.');
+        expect($('#download-selected').disabled&&$$('[data-download-file]').every(button=>button.disabled),'New downloads must wait for folder cleanup.');
+        window.NexusM.receive({event:'state',data:{clearingDownloadFolder:false}});
+        window.NexusM.receive({id:folderClearRequest.id,ok:true,result:{state:{downloads:[],fileDownloads:fixture.fileDownloads,mods:fixture.mods,clearingDownloadFolder:false}}});folderClearRequest=null;
+        await settle();
+        expect(!$('#clear-download-folder-button').disabled&&!$('#browse-folder-button').disabled&&!$('#save-folder-button').disabled,'Idle cleanup controls must restore after the host response.');
+        expect(!$('#download-selected').disabled&&$('[data-select-file="10"]').checked,'Selected downloads should restore after cleanup.');
+        expect($('[data-file-card="10"] .file-download-flag.downloaded')&&$('[data-file-card="12"] .file-download-flag.downloaded'),'Clearing disk files must retain downloaded history flags.');
+        expect($('[data-mod-key="game1:1"] .table-date').textContent.includes('2026'),'Mod download history should remain visible.');
+        $('#detail-close').click();
+        window.NexusM.setState({downloads:fixture.downloads});
+      });
       await check('automatic refresh shows progress and keeps the cached library usable',()=>{
         window.NexusM.navigate('library');
         window.NexusM.receive({event:'refreshProgress',data:{running:true,phase:'connecting',message:'Connecting to Nexus.'}});
@@ -248,6 +286,8 @@
     } catch(error) {report.checks.push({test:'UI fixture setup',passed:false,error:error.message});}
     finally {
       if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
+      if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
+      window.NexusM.setState({clearingDownloadFolder:false});
       window.NexusM.receive({event:'refreshProgress',data:{running:false}});
       bridge.postMessage=originalPost;
       if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();

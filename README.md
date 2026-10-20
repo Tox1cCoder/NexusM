@@ -16,6 +16,8 @@ Enter your personal Nexus Mods API key under **Settings**. NexusM reuses a key a
 
 Downloads queue sequentially. Cancel/closing the app keeps a `.part` file; Retry obtains fresh website authorization and resumes when the server supports it. Completed archives are not overwritten. Each file downloaded through NexusM gets its own local download record. Imported website history contains mod-level dates, not historical per-file markers. **Downloads → Clear list** removes finished, failed, cancelled, interrupted, and waiting entries. Active/queued transfers remain, and clearing never deletes archives, partial files, or saved download dates. Waiting website windows close with their removed entries.
 
+**Downloads → Clear download folder** shows the selected folder and file count for confirmation, then moves files directly in that folder to the Windows Recycle Bin, including unfinished downloads and their sidecars. Subfolders, download records, and downloaded-file flags stay. Finish or cancel pending downloads first. Use a dedicated folder on a local fixed drive; personal library roots and NexusM's own application/data folders cannot be cleared.
+
 The embedded Nexus window captures download links without changing your Windows protocol settings. **Settings → Handle Nexus download links** optionally makes NexusM the default `nxm://` handler for links clicked in your normal browser; this replaces the current handler.
 
 ## History and author information
@@ -38,6 +40,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Backend.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryImport.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCleanup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
