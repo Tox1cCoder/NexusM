@@ -27,7 +27,7 @@ namespace NexusM
         internal MainForm(Storage store, string nxm, string smoke, string pipeIdentity) {
             storage = store; initialNxm = nxm; smokeReport = smoke; identity = pipeIdentity;
             Text = "NexusM"; Width = 1340; Height = 880; MinimumSize = new Size(980, 680); StartPosition = FormStartPosition.CenterScreen;
-            BackColor = Color.FromArgb(22, 23, 27); Icon = SystemIcons.Application;
+            BackColor = Color.FromArgb(22, 23, 27); Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             web.Dock = DockStyle.Fill; web.DefaultBackgroundColor = BackColor; Controls.Add(web);
             Controller = new Controller(this, storage);
             Shown += async delegate { await Initialize(); };
@@ -203,6 +203,7 @@ namespace NexusM
             }
             if (flowScript != null) { Opacity = 0; ShowInTaskbar = false; }
             Text = history ? "NexusM — import download history" : "NexusM — authorize free download";
+            Icon = parent.Icon;
             Size = new Size(1120, 840); MinimumSize = new Size(800, 600); StartPosition = FormStartPosition.CenterParent;
             BackColor = Color.FromArgb(32, 33, 38); ForeColor = Color.White; Font = new Font("Segoe UI", 9F);
             browser.Dock = DockStyle.Fill; Controls.Add(browser);

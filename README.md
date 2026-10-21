@@ -4,7 +4,7 @@ A small Windows desktop app for checking Nexus Mods updates, reading release inf
 
 ## Run
 
-Open `dist\NexusM.exe`. Keep the other files in `dist` beside it. The portable app is about 1.2 MB and uses .NET Framework 4.8 and Microsoft Edge WebView2 Runtime. These components are commonly already installed on Windows. Browser profile data and downloaded archives are separate from that size.
+Open `dist\NexusM.exe`. Keep the other files in `dist` beside it. The portable app is about 1.3 MB and uses .NET Framework 4.8 and Microsoft Edge WebView2 Runtime. These components are commonly already installed on Windows. Browser profile data and downloaded archives are separate from that size.
 
 Enter your personal Nexus Mods API key under **Settings**. NexusM reuses a key already configured for the current Windows account and encrypts it with Windows DPAPI in `%LOCALAPPDATA%\NexusM\api-key.bin`. The key is never embedded in the executable, source, library backup, or download sidecar. Each Windows account configures its own key.
 
@@ -33,6 +33,8 @@ Library/download records live in `%LOCALAPPDATA%\NexusM\state.json`. The WebView
 ## Build and verify
 
 No Node, Electron, SDK installation, or bundled browser is needed. The build uses Windows' C# compiler and downloads the pinned Microsoft WebView2 SDK package into `%LOCALAPPDATA%\NexusM-BuildCache`.
+
+The app icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-Icon.ps1` to update `src\app.ico` before building. The Windows executable and app windows use the embedded icon; the sidebar and Settings use the SVG.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1

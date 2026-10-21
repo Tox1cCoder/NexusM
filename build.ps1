@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Path $output -Force | Out-Null
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $framework = Split-Path $compiler
 $arguments = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/langversion:5', '/codepage:65001', ('/out:' + (Join-Path $output 'NexusM.exe')), ('/win32manifest:' + (Join-Path $workspace 'src\app.manifest')))
+$arguments += '/win32icon:' + (Join-Path $workspace 'src\app.ico')
 foreach ($assembly in @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Net.Http.dll','System.Web.dll','System.Web.Extensions.dll','System.Security.dll','System.Xml.dll','Microsoft.VisualBasic.dll')) {
     $arguments += '/reference:' + (Join-Path $framework $assembly)
 }
