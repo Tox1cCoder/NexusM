@@ -35,7 +35,11 @@
     if(msg.event==='state') setState(msg.data);
     if(msg.event==='download' || msg.event==='downloadProgress') {
       if(msg.data?.downloads) setState(msg.data);
-      else if(msg.data?.id){const i=state.downloads.findIndex(d=>String(d.id)===String(msg.data.id));if(i>=0)state.downloads[i]={...state.downloads[i],...msg.data};else state.downloads.unshift(msg.data);renderDownloads();renderCounts();refreshFileDownloadFlags();}
+      else if(msg.data?.id){
+        const i=state.downloads.findIndex(d=>String(d.id)===String(msg.data.id));
+        state.downloads=i>=0?state.downloads.map((d,index)=>index===i?{...d,...msg.data}:d):[msg.data,...state.downloads];
+        renderDownloads();renderCounts();refreshFileDownloadFlags();
+      }
     }
     if(msg.event==='error') toast(msg.data?.message || msg.data || 'Something went wrong.',true);
     if(msg.event==='notice') toast(msg.data?.message || msg.data);
@@ -83,7 +87,10 @@
     }catch(error){toast(error.message,true);}
     finally{loadingLibrary=false;renderRefresh();}
   }
-  function consume(result) {if(result?.games || result?.mods || result?.downloads)setState(result);else if(result?.state)setState(result.state);}
+  function consume(result) {
+    const next=result?.state??result;
+    if(next&&['games','mods','downloads','settings','user','fileDownloads','lastCheckedAt','refreshProgress','clearingDownloadFolder','notice'].some(key=>Object.prototype.hasOwnProperty.call(next,key)))setState(next);
+  }
   function setState(next) {
     if(!next || typeof next!=='object')return;
     state={...state,...next,settings:{...state.settings,...next.settings}};
@@ -118,7 +125,8 @@
     $('#library-count').textContent=libraryMods().length;
     $('#game-count').textContent=state.games.length;
     const active=state.downloads.filter(d=>!['completed','failed','cancelled','canceled','interrupted'].includes(d.status)).length;
-    $('#download-count').textContent=active;
+    const downloads=$('#download-count'),total=state.downloads.length;
+    downloads.textContent=total;downloads.title=`${total} ${total===1?'download':'downloads'}, ${active} active`;
     const name=state.user?.name || state.user?.username;
     $('#account').innerHTML=`<span class="avatar">${esc(name?shortName(name):'N')}</span><div><strong>${esc(name || 'Not connected')}</strong><small>${name?(state.user.isPremium?'Premium account':'Free account'):'Connect your Nexus account'}</small></div><button class="icon-button" data-page="settings" aria-label="Account settings">${icon('settings')}</button>`;
   }

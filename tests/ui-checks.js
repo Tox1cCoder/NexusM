@@ -58,7 +58,7 @@
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
-          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{state:{settings:{yourGamesOnly:message.payload.yourGamesOnly}}}}));
+          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{settings:{yourGamesOnly:message.payload.yourGamesOnly}}}));
         }
         else if(message.action==='clearDownloads'){
           requests.push(message);
@@ -112,6 +112,18 @@
         $('[data-select-game=""]').click();
         $('#your-games-only').click();await settle();
         expect($('#your-games-only').getAttribute('aria-pressed')==='true'&&$('#library-count').textContent==='3','Enabling the filter should restore the Your games scope.');
+      });
+      await check('library counts follow live mod, review, and game changes',()=>{
+        const added={gameDomain:'game1',modId:5,name:'New live mod',needsReview:false};
+        window.NexusM.receive({event:'state',data:{mods:[...fixture.mods,added]}});
+        expect($('#library-count').textContent==='4'&&$('#all-count').textContent==='4'&&$('#updates-count').textContent==='2','Adding a mod should immediately update library and filter counts.');
+        expect($('[data-select-game=""] small').textContent==='4 mods'&&$('[data-select-game="game1"]').title.includes('3 mods'),'Game card counts should immediately include new mods.');
+        $('[data-select-game="game1"]').click();$('[data-filter="updates"]').click();
+        window.NexusM.receive({event:'state',data:{mods:[...fixture.mods.map(m=>m.modId===1?{...m,needsReview:false}:m),added]}});
+        expect($('#all-count').textContent==='3'&&$('#updates-count').textContent==='0'&&$('#visible-count').textContent==='0 of 3 mods','Review changes should update the selected game and filtered row count.');
+        window.NexusM.receive({event:'state',data:{games:fixture.games.filter(g=>g.domain!=='game1')}});
+        expect($('#game-count').textContent==='8'&&$('#library-count').textContent==='1'&&$('#all-count').textContent==='1'&&$('#mods-title').textContent==='All mods','Removing the selected game should reset its scope and update all counts.');
+        $('[data-filter="all"]').click();window.NexusM.setState(fixture);
       });
       await check('multiple main files and optional files stay separate',async()=>{
         await window.NexusM.showMod('game1:1');
@@ -169,10 +181,26 @@
         $('[data-detail-tab="requirements"]').click();expect($('#detail-tab-body').innerText.includes('Required framework'),'Requirement missing.');
       });
       $('#detail-close').click();
-      await check('interrupted downloads offer retry and do not count as active',()=>{
+      await check('interrupted downloads remain counted and offer retry',()=>{
         window.NexusM.navigate('downloads');
         expect($('[data-retry-download="interrupted-fixture"]'),'Interrupted download needs a Retry control.');
-        expect($('#download-count').textContent==='0','Interrupted download should not count as active.');
+        expect($('#download-count').textContent==='1'&&$('#download-count').title==='1 download, 0 active','The badge should count visible entries and distinguish inactive downloads.');
+      });
+      await check('download count follows queue events, completion, retries, and clearing',()=>{
+        const record={id:'live-count-fixture',name:'Live count archive',status:'queued'};
+        window.NexusM.receive({event:'download',data:record});
+        expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloads, 1 active','A new queued entry should immediately increase the total.');
+        window.NexusM.receive({event:'downloadProgress',data:{id:record.id,status:'downloading',bytes:1024,total:4096}});
+        expect($('#download-count').textContent==='2'&&$$('#downloads-list .download-card').length===2,'Progress should update the existing entry without counting it twice.');
+        for(const status of ['completed','failed','cancelled']){
+          window.NexusM.receive({event:'download',data:{id:record.id,status}});
+          expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloads, 0 active',`A ${status} entry should remain counted while it stays in the list.`);
+        }
+        window.NexusM.receive({event:'download',data:{id:record.id,status:'waiting-authorization'}});
+        expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloads, 1 active','Retrying an entry should update its active status without increasing the total.');
+        window.NexusM.receive({event:'download',data:{downloads:[]}});
+        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloads, 0 active'&&!$$('#downloads-list .download-card').length,'An empty replacement list should reset the count immediately.');
+        window.NexusM.setState(fixture);
       });
       await check('authorization preparation and user attention have distinct statuses',()=>{
         window.NexusM.setState({downloads:[{id:'preparing-fixture',gameDomain:'game1',name:'Preparing archive',status:'waiting-authorization',needsUser:false,authorizationMessage:'Waiting for the Nexus countdown.'},{id:'attention-fixture',gameDomain:'game1',name:'Attention archive',status:'waiting-authorization',needsUser:true,authorizationMessage:'Sign in to Nexus to continue.'}]});
