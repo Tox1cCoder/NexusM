@@ -37,6 +37,8 @@ namespace NexusM
                 Check("clearing downloads preserves the newest successful file history, including legacy queue-only rows", TestClearDownloadHistory);
                 Check("clearing an empty download list is safe and idempotent", TestClearEmptyDownloads);
                 Check("Your games filter defaults on, persists boolean changes, and rejects malformed payloads safely", TestYourGamesSetting);
+                Check("custom download folders save exactly and survive restart while the default remains Downloads/NexusM", TestDownloadFolderSetting);
+                Check("invalid or unavailable download folders retain the saved path and other settings", TestInvalidDownloadFolderSetting);
                 Check("clearing the download folder confirms the exact files and retains subfolders and all download history", TestClearDownloadFolder);
                 Check("cancelled or empty folder cleanup leaves files and history untouched", TestCancelDownloadFolderCleanup);
                 Check("folder cleanup refuses active transfers and pending authorizations before confirmation", TestDownloadFolderActiveGuards);
@@ -198,14 +200,14 @@ namespace NexusM
 
         private static void TestMalformedStorage()
         {
-            string[] fixtures = { "not JSON", "[]", "null", "{\"settings\":\"unexpected\"}", "{\"settings\":[1,2],\"games\":false,\"mods\":123,\"downloads\":null}", "{\"settings\":{\"downloadFolder\":\" \"}}", "{\"settings\":{\"downloadFolder\":123}}" };
+            string[] fixtures = { "not JSON", "[]", "null", "{\"settings\":\"unexpected\"}", "{\"settings\":[1,2],\"games\":false,\"mods\":123,\"downloads\":null}", "{\"settings\":{\"downloadFolder\":\" \"}}", "{\"settings\":{\"downloadFolder\":123}}", "{\"settings\":{\"downloadFolder\":\"relative-folder\"}}", "{\"settings\":{\"downloadFolder\":\"C:\\\\invalid?folder\"}}" };
             for (int i = 0; i < fixtures.Length; i++)
             {
                 string folder = Path.Combine(root, "malformed-" + i); Directory.CreateDirectory(folder);
                 File.WriteAllText(Path.Combine(folder, "state.json"), fixtures[i]);
                 Storage storage = new Storage(folder);
                 object downloadFolder = Data.Get(storage.Settings, "downloadFolder");
-                Expect(downloadFolder is string && Path.IsPathRooted((string)downloadFolder), "Malformed settings did not recover an absolute download folder for fixture " + i + ".");
+                Expect(downloadFolder is string && (string)downloadFolder == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "NexusM"), "Malformed settings did not recover the default download folder for fixture " + i + ".");
                 Expect(storage.Games != null && storage.Mods != null && storage.Downloads != null, "Malformed collections were not initialized.");
                 storage.Save();
                 Expect(File.Exists(Path.Combine(folder, "state.json")), "Recovered state could not be saved.");
@@ -377,6 +379,62 @@ namespace NexusM
             File.WriteAllText(Path.Combine(malformedFolder, "state.json"), "{\"settings\":{\"yourGamesOnly\":\"false\"}}");
             Storage recovered = new Storage(malformedFolder);
             Expect(Data.Get(recovered.Settings, "yourGamesOnly") is bool && Data.Bool(recovered.Settings, "yourGamesOnly"), "A malformed disk setting did not recover the default filter.");
+        }
+
+        private static void TestDownloadFolderSetting()
+        {
+            Storage storage = NewStore("download-folder-setting");
+            string defaultFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "NexusM");
+            Expect(Data.Str(storage.Settings, "downloadFolder") == defaultFolder, "A new library changed the default download folder.");
+            string custom = Path.Combine(root, "Custom Downloads");
+            WithController(storage, delegate(Controller controller)
+            {
+                object result = controller.Handle("saveSettings", Data.Obj("downloadFolder", custom)).GetAwaiter().GetResult();
+                Expect(Directory.Exists(custom), "Saving a new download folder did not create it.");
+                Expect(Data.Str(storage.Settings, "downloadFolder") == custom && Data.Str(Data.Get(result, "settings"), "downloadFolder") == custom, "Saving appended a subfolder or returned a different path.");
+                Expect(!Directory.Exists(Path.Combine(custom, "NexusM")), "Saving a custom folder created an unwanted NexusM subfolder.");
+                Expect(Data.Str(new Storage(storage.Root).Settings, "downloadFolder") == custom, "A custom folder did not survive restart.");
+                // Saving does not inherit the stricter rules for recycling whole folders.
+                controller.Handle("saveSettings", Data.Obj("downloadFolder", storage.Root)).GetAwaiter().GetResult();
+                Expect(Data.Str(storage.Settings, "downloadFolder") == storage.Root, "A folder protected from cleanup was rejected as a download destination.");
+                Expect(controller.Api == null, "Changing a local download folder unexpectedly accessed Nexus.");
+            });
+            // Validate and reload other-drive and network paths without touching either destination.
+            foreach (string configured in new[] { @"D:\Downloads", @"\\fixture-server\shared downloads" })
+            {
+                Expect(Storage.NormalizeDownloadFolder(configured) == configured, "Absolute folder validation changed a custom destination.");
+                storage.Settings["downloadFolder"] = configured; storage.Save();
+                Expect(Data.Str(new Storage(storage.Root).Settings, "downloadFolder") == configured, "Reloading a custom folder appended a suffix or restored the default.");
+            }
+            Expect(Data.Str(NewStore("download-folder-default").Settings, "downloadFolder") == defaultFolder, "A custom destination changed the default for another library.");
+        }
+
+        private static void TestInvalidDownloadFolderSetting()
+        {
+            Storage storage = NewStore("invalid-download-folder");
+            string retained = Path.Combine(root, "retained-download-folder");
+            WithController(storage, delegate(Controller controller)
+            {
+                controller.Handle("saveSettings", Data.Obj("downloadFolder", retained)).GetAwaiter().GetResult();
+                string before = File.ReadAllText(Path.Combine(storage.Root, "state.json"));
+                object[] invalid = { null, "", " ", "relative-folder", @"..\Downloads", @"D:Downloads", @"\Downloads", @"C:\invalid?folder", @"C:\invalid*folder", @"C:\invalid|folder", @"C:\folder:stream", "C:\\invalid\0folder", 123, Data.Obj("path", retained) };
+                foreach (object value in invalid)
+                {
+                    bool rejected = false;
+                    try { controller.Handle("saveSettings", Data.Obj("downloadFolder", value, "yourGamesOnly", false)).GetAwaiter().GetResult(); }
+                    catch (ArgumentException error) { rejected = error.Message == "Enter a valid absolute download folder path, such as D:\\Downloads."; }
+                    Expect(rejected, "An invalid download folder was accepted or lacked a useful error.");
+                    Expect(Data.Str(storage.Settings, "downloadFolder") == retained && Data.Bool(storage.Settings, "yourGamesOnly"), "Invalid folder input changed saved settings.");
+                    Expect(File.ReadAllText(Path.Combine(storage.Root, "state.json")) == before, "Invalid folder input changed the state file.");
+                }
+                string occupied = Path.Combine(root, "occupied-folder-path"); File.WriteAllText(occupied, "fixture file");
+                bool unavailable = false;
+                try { controller.Handle("saveSettings", Data.Obj("downloadFolder", Path.Combine(occupied, "Downloads"))).GetAwaiter().GetResult(); }
+                catch (IOException) { unavailable = true; }
+                Expect(unavailable && File.ReadAllText(occupied) == "fixture file", "An unavailable destination was accepted or changed its blocking file.");
+                Expect(Data.Str(storage.Settings, "downloadFolder") == retained && File.ReadAllText(Path.Combine(storage.Root, "state.json")) == before, "A failed folder creation replaced the saved destination.");
+            });
+            Expect(Data.Str(new Storage(storage.Root).Settings, "downloadFolder") == retained, "Rejected folder input changed the destination after restart.");
         }
 
         private static string CleanupFolder(Storage storage, string suffix)

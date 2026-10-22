@@ -39,7 +39,8 @@ namespace NexusM
             if (action == "getState") return Store.PublicState();
             if (action == "initialize") { await Initialize(); return Store.PublicState(); }
             if (action == "saveSettings") {
-                if (p.ContainsKey("downloadFolder")) RequireFolderAvailable();
+                string folder = null;
+                if (p.ContainsKey("downloadFolder")) { RequireFolderAvailable(); folder = Storage.NormalizeDownloadFolder(p["downloadFolder"]); }
                 if (p.ContainsKey("yourGamesOnly") && !(p["yourGamesOnly"] is bool)) throw new ArgumentException("Your games filter must be enabled or disabled.");
                 if (p.ContainsKey("apiKey") && !String.IsNullOrWhiteSpace(Data.Str(p, "apiKey"))) {
                     if (transfers.Count > 0) throw new InvalidOperationException("Finish or cancel active downloads before changing your API key.");
@@ -49,16 +50,16 @@ namespace NexusM
                     if (refreshTask != null) await refreshTask;
                     Store.WriteKey(key); ResetApi(); initialized = false; initializationTask = null; await Connect();
                 }
-                if (p.ContainsKey("downloadFolder")) { RequireFolderAvailable(); string folder = Path.GetFullPath(Data.Str(p, "downloadFolder")); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
+                if (folder != null) { RequireFolderAvailable(); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
                 if (p.ContainsKey("yourGamesOnly")) Store.Settings["yourGamesOnly"] = (bool)p["yourGamesOnly"];
                 Store.Save(); Emit(); return Store.PublicState();
             }
             if (action == "browseFolder") {
                 RequireFolderAvailable();
                 using (var dialog = new FolderBrowserDialog { Description = "Choose where NexusM saves mod archives", SelectedPath = Folder, ShowNewFolderButton = true }) {
-                    if (dialog.ShowDialog(window) == DialogResult.OK) { RequireFolderAvailable(); Store.Settings["downloadFolder"] = dialog.SelectedPath; Store.Save(); Emit(); }
+                    if (dialog.ShowDialog(window) == DialogResult.OK) { RequireFolderAvailable(); return Data.Obj("path", Storage.NormalizeDownloadFolder(dialog.SelectedPath)); }
                 }
-                return Store.PublicState();
+                return Data.Obj("cancelled", true);
             }
             if (action == "syncGames" || (action == "importWebsite" && Data.Str(p, "kind") == "favorites")) { await SyncGames(); Emit(); return Store.PublicState(); }
             if (action == "addGame") { await AddGame(Data.Str(p, "query")); Emit(); return Store.PublicState(); }

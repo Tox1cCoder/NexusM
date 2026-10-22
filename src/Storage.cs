@@ -40,8 +40,8 @@ namespace NexusM
             if (!State.ContainsKey("mods")) State["mods"] = new List<object>(); else State["mods"] = Data.List(State["mods"]);
             if (!State.ContainsKey("downloads")) State["downloads"] = new List<object>(); else State["downloads"] = Data.List(State["downloads"]);
             if (!(Data.Get(State, "settings") is Dictionary<string, object>)) State["settings"] = new Dictionary<string, object>();
-            string configuredFolder = Data.Get(Settings, "downloadFolder") as string;
-            try { if (String.IsNullOrWhiteSpace(configuredFolder) || !RegexPath(configuredFolder)) configuredFolder = null; else configuredFolder = Path.GetFullPath(configuredFolder); } catch { configuredFolder = null; }
+            string configuredFolder;
+            try { configuredFolder = NormalizeDownloadFolder(Data.Get(Settings, "downloadFolder")); } catch { configuredFolder = null; }
             Settings["downloadFolder"] = configuredFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "NexusM");
             if (!(Data.Get(Settings, "yourGamesOnly") is bool)) Settings["yourGamesOnly"] = true;
             foreach (var entry in Downloads) {
@@ -53,7 +53,17 @@ namespace NexusM
             State.Remove("clearingDownloadFolder");
         }
         internal List<object> Games { get { return (List<object>)State["games"]; } }
-        private static bool RegexPath(string path) { return System.Text.RegularExpressions.Regex.IsMatch(path, @"^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)"); }
+        internal static string NormalizeDownloadFolder(object value) {
+            const string message = "Enter a valid absolute download folder path, such as D:\\Downloads.";
+            string folder = value as string;
+            if (String.IsNullOrWhiteSpace(folder) || !System.Text.RegularExpressions.Regex.IsMatch(folder, @"^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+)") ||
+                folder.IndexOfAny(Path.GetInvalidPathChars()) >= 0 || folder.IndexOfAny(new[] { '*', '?' }) >= 0 || folder.Substring(2).Contains(':'))
+                throw new ArgumentException(message);
+            try { return Path.GetFullPath(folder); }
+            catch (ArgumentException) { throw new ArgumentException(message); }
+            catch (NotSupportedException) { throw new ArgumentException(message); }
+            catch (PathTooLongException) { throw new ArgumentException(message); }
+        }
         internal List<object> Mods { get { return (List<object>)State["mods"]; } }
         internal List<object> Downloads { get { return (List<object>)State["downloads"]; } }
         internal Dictionary<string, object> Settings { get { return Data.Map(State["settings"]); } }
