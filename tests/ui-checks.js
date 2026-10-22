@@ -8,6 +8,8 @@
   let snapshot = null;
   let refreshRequest = null;
   let folderClearRequest = null;
+  let folderSaveRequest = null;
+  let browseFolderResult = {cancelled:true};
   const requests = [];
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
   const check = async (name, test) => {
@@ -70,6 +72,13 @@
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
           queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{settings:{yourGamesOnly:message.payload.yourGamesOnly}}}));
+        }
+        else if(message.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(message.payload,'downloadFolder')){
+          requests.push(message);folderSaveRequest=message;
+        }
+        else if(message.action==='browseFolder'){
+          requests.push(message);
+          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:browseFolderResult}));
         }
         else if(message.action==='clearDownloads'){
           requests.push(message);
@@ -280,11 +289,13 @@
         expect(!$('#input-dialog').open,'The native host handles confirmation; no second app dialog should open.');
         expect($('#clear-download-folder-button').disabled&&$('#clear-download-folder-button').getAttribute('aria-busy')==='true','The folder button should stay busy until cleanup finishes.');
         expect($('#browse-folder-button').disabled&&$('#save-folder-button').disabled,'The configured folder must stay fixed during cleanup.');
+        expect($('#download-folder').disabled,'The editable folder path must also be locked during cleanup.');
         expect($('#download-selected').disabled&&$$('[data-download-file]').every(button=>button.disabled),'New downloads must wait for folder cleanup.');
         window.NexusM.receive({event:'state',data:{clearingDownloadFolder:false}});
         window.NexusM.receive({id:folderClearRequest.id,ok:true,result:{state:{downloads:[],fileDownloads:fixture.fileDownloads,mods:fixture.mods,clearingDownloadFolder:false}}});folderClearRequest=null;
         await settle();
         expect(!$('#clear-download-folder-button').disabled&&!$('#browse-folder-button').disabled&&!$('#save-folder-button').disabled,'Idle cleanup controls must restore after the host response.');
+        expect(!$('#download-folder').disabled,'The folder path should become editable after cleanup.');
         expect(!$('#download-selected').disabled&&$('[data-select-file="10"]').checked,'Selected downloads should restore after cleanup.');
         expect($('[data-file-card="10"] .file-download-flag.downloaded')&&$('[data-file-card="12"] .file-download-flag.downloaded'),'Clearing disk files must retain downloaded history flags.');
         expect($('[data-mod-key="game1:1"] .table-date').textContent.includes('2026'),'Mod download history should remain visible.');
@@ -332,6 +343,52 @@
         expect($('#api-key').type==='password'&&!$('#api-key').value,'The saved secret must not be sent to the UI.');
         expect($('#browse-folder-button')&&$('#clear-cache-button')&&$('#register-nxm-button'),'A required settings control is missing.');
       });
+      await check('typed download folder survives live state updates and saves without an added subfolder',async()=>{
+        window.NexusM.setState({settings:fixture.settings});
+        const input=$('#download-folder'),path='D:\\Downloads';
+        expect(!input.readOnly&&!input.disabled,'The download folder should accept a typed path.');
+        input.value=path;input.dispatchEvent(new Event('input',{bubbles:true}));
+        window.NexusM.receive({event:'state',data:{mods:fixture.mods,settings:fixture.settings}});
+        expect(input.value===path,'A live library update must not erase an unsaved path.');
+        window.NexusM.navigate('library');window.NexusM.navigate('settings');
+        expect(input.value===path,'Browsing the library must preserve an unsaved path.');
+        $('#save-folder-button').click();
+        expect(folderSaveRequest?.payload.downloadFolder===path,'The exact custom folder should be submitted, without a NexusM suffix.');
+        window.NexusM.receive({id:folderSaveRequest.id,ok:true,result:{settings:{downloadFolder:path}}});folderSaveRequest=null;await settle();
+        expect(input.value===path&&$('.toasts').textContent.includes('Download location saved.'),'The saved path and confirmation should be visible.');
+        window.NexusM.receive({event:'state',data:{settings:{downloadFolder:'E:\\Archives'}}});
+        expect(input.value==='E:\\Archives','After saving, the field should follow the stored setting again.');
+      });
+      await check('Browse stages a chosen folder until Save and Cancel preserves a typed path',async()=>{
+        const input=$('#download-folder'),typed='D:\\Downloads',chosen='E:\\Mod Archives';
+        input.value=typed;input.dispatchEvent(new Event('input',{bubbles:true}));
+        browseFolderResult={cancelled:true};$('#browse-folder-button').click();await settle();
+        expect(input.value===typed,'Cancelling Browse must retain the typed path.');
+        const saves=requests.filter(r=>r.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(r.payload,'downloadFolder')).length;
+        browseFolderResult={path:chosen};$('#browse-folder-button').click();await settle();
+        expect(input.value===chosen,'Browse should place the selected folder in the field.');
+        expect(requests.filter(r=>r.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(r.payload,'downloadFolder')).length===saves,'Browse should wait for Save location before persisting the selection.');
+        window.NexusM.receive({event:'state',data:{settings:fixture.settings}});
+        expect(input.value===chosen,'The selected folder must survive a background state update before Save.');
+        $('#save-folder-button').click();
+        expect(folderSaveRequest?.payload.downloadFolder===chosen,'Save should submit the Browse selection exactly.');
+        window.NexusM.receive({id:folderSaveRequest.id,ok:true,result:{settings:{downloadFolder:chosen}}});folderSaveRequest=null;await settle();
+      });
+      await check('failed saves and in-flight edits preserve the folder draft',async()=>{
+        const input=$('#download-folder'),submitted='D:\\Downloads',newer='E:\\Next Downloads';
+        input.value=submitted;input.dispatchEvent(new Event('input',{bubbles:true}));$('#save-folder-button').click();
+        const first=folderSaveRequest;
+        input.value=newer;input.dispatchEvent(new Event('input',{bubbles:true}));
+        window.NexusM.receive({id:first.id,ok:true,result:{settings:{downloadFolder:submitted}}});folderSaveRequest=null;await settle();
+        expect(input.value===newer,'Saving the previous path must not clear a newer edit.');
+        input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));$('#save-folder-button').click();
+        window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'Enter a valid absolute download folder path, such as D:\\Downloads.'});folderSaveRequest=null;await settle();
+        window.NexusM.receive({event:'state',data:{settings:{downloadFolder:submitted}}});
+        expect(input.value===''&&!$('#save-folder-button').disabled,'A failed save must retain the draft and allow correction.');
+        expect($('.toasts').textContent.includes('valid absolute download folder'),'The path validation error should be visible.');
+        input.value=fixture.settings.downloadFolder;input.dispatchEvent(new Event('input',{bubbles:true}));$('#save-folder-button').click();
+        window.NexusM.receive({id:folderSaveRequest.id,ok:true,result:{settings:fixture.settings}});folderSaveRequest=null;await settle();
+      });
       await check('empty Your games scope still exposes the filter and imported history',async()=>{
         window.NexusM.setState({games:[],mods:fixture.mods,downloads:[]});window.NexusM.navigate('library');
         expect(!$('#library-empty').classList.contains('hidden'),'Empty state is hidden.');
@@ -351,6 +408,7 @@
     finally {
       if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
+      if(folderSaveRequest)window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'UI fixture ended.'});
       window.NexusM.setState({clearingDownloadFolder:false});
       window.NexusM.receive({event:'refreshProgress',data:{running:false}});
       bridge.postMessage=originalPost;

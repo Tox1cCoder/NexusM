@@ -12,6 +12,7 @@
   let selectedFiles = new Set();
   let lastFocus = null, lastNotice = null;
   let loadingLibrary = false, refreshPromise = null;
+  let downloadFolderDraft = null;
 
   function rpc(action, payload = {}) {
     const bridge = window.chrome?.webview;
@@ -171,6 +172,7 @@
     const active=state.downloads.some(d=>['queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization'].includes(d.status||'queued'));
     const clear=$('#clear-download-folder-button');
     clear.disabled=clearing||active||clear.classList.contains('busy');clear.setAttribute('aria-busy',String(clearing||clear.classList.contains('busy')));
+    $('#download-folder').disabled=clearing;
     for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||(button.id==='download-selected'&&selectedFiles.size===0);
   }
   function renderSettings(){
@@ -178,7 +180,7 @@
     $('#connection-badge').textContent=state.user?'Connected':state.settings.hasApiKey?'Key saved':'Not connected';$('#connection-badge').classList.toggle('current',!!state.user);
     $('#api-key').placeholder=connected?'A key is saved. Paste here to replace it.':'Paste a personal Nexus API key';
     $('#key-help').textContent='Stored locally on this computer. Never included in exports.';
-    $('#download-folder').value=state.settings.downloadFolder??'';
+    $('#download-folder').value=downloadFolderDraft??state.settings.downloadFolder??'';
     if($('#cache-size'))$('#cache-size').textContent=state.settings.cacheSizeMB!=null?`${Number(state.settings.cacheSizeMB).toFixed(1)} MB cached. Images can be fetched again.`:'Images can be fetched again when you open the app.';
     renderDownloadControls();
   }
@@ -324,8 +326,8 @@
       'your-games-only':()=>run('saveSettings',{yourGamesOnly:state.settings.yourGamesOnly===false},target),
       'toggle-key':()=>{const input=$('#api-key');input.type=input.type==='password'?'text':'password';target.textContent=input.type==='password'?'Show':'Hide';},
       'save-key-button':async()=>{const apiKey=$('#api-key').value.trim();if(!apiKey){toast('Paste your personal Nexus API key first.',true);return;}const result=await run('saveSettings',{apiKey},target);if(result!==null){$('#api-key').value='';$('#api-key').type='password';$('#toggle-key').textContent='Show';toast('Connected to Nexus Mods.');await checkUpdates('initialize');}},
-      'browse-folder-button':async()=>{const result=await run('browseFolder',{},target);if(typeof result==='string')$('#download-folder').value=result;else if(result?.path)$('#download-folder').value=result.path;else if(result?.downloadFolder)$('#download-folder').value=result.downloadFolder;},
-      'save-folder-button':()=>run('saveSettings',{downloadFolder:$('#download-folder').value},target,'Download location saved.'),
+      'browse-folder-button':async()=>{const result=await run('browseFolder',{},target);const path=typeof result==='string'?result:result?.path??result?.downloadFolder;if(typeof path==='string'){downloadFolderDraft=path;renderSettings();}},
+      'save-folder-button':async()=>{const path=$('#download-folder').value;const result=await run('saveSettings',{downloadFolder:path},target,'Download location saved.');if(result!==null&&$('#download-folder').value===path){downloadFolderDraft=null;renderSettings();}},
       'clear-cache-button':()=>run('clearCache',{},target,'Image cache cleared.'),
       'register-nxm-button':()=>run('registerNxm',{},target,'NexusM now handles Nexus download links on this Windows account.'),
       'mark-reviewed-button':async()=>{if(!detail)return;const result=await run('markReviewed',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod)},target);if(result!==null){detail.mod={...detail.mod,needsReview:false};toast('Marked reviewed. Your download date stays the same.');target.innerHTML=`${icon('check')}Reviewed`;target.disabled=true;}},
@@ -344,6 +346,7 @@
   });
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('#input-dialog').open)closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('#input-dialog').open){const focusable=$$('button:not([disabled]),input,a[href],select,textarea', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
   $('#mod-search').addEventListener('input',renderMods);$('#mod-sort').addEventListener('change',renderMods);$('#input-form').addEventListener('submit',submitDialog);$('#detail-scrim').addEventListener('click',closeDetail);
+  $('#download-folder').addEventListener('input',e=>{downloadFolderDraft=e.target.value;});
   document.addEventListener('error',e=>{if(e.target.tagName==='IMG'){e.target.style.display='none';if(e.target.closest('.game-card'))e.target.parentElement.insertAdjacentHTML('afterbegin',`<span class="game-fallback">${icon('game')}<span>${esc(e.target.parentElement.title?.split(' · ')[0]||'Game')}</span></span>`);}},true);
 
   // Exposed for host-driven refreshes and local smoke tests, never contains the key.
