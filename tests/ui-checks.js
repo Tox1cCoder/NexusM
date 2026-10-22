@@ -40,7 +40,18 @@
       {fileId:11,name:'Main alternative',category:'MAIN',version:'2.0',size:8192,uploadedAt:1792450000,downloadedAt:0,description:'[url=javascript:alert(1)]Bad link[/url]'},
       {fileId:12,name:'Optional translation',category:'OPTIONAL',version:'1.1',size:2048,uploadedAt:1792400000,description:'[i]Requires the main file[/i]'}
     ],
-    changelogs:{'2.0':['Fixes [b]a bug[/b]','New dependency']},
+    changelogs:{
+      '1.9':['Older release'],
+      '2':['Major release'],
+      'v1.10-rc.2':['Second release candidate'],
+      '10':['Latest major release'],
+      '2.0':['Fixes [b]a bug[/b]','New dependency'],
+      '1.10':['Stable release'],
+      'v1.10-rc.10':['Tenth release candidate'],
+      '1.10-beta.2':['Beta release'],
+      '1.10-alpha.1':['Alpha release'],
+      '1.10.1':['Patch release']
+    },
     requirements:[{name:'Required framework',url:'https://www.nexusmods.com/game1/mods/99',notes:'Install this first.'}]
   };
   async function run() {
@@ -176,8 +187,33 @@
         expect(body.querySelector('a[href^="https://www.nexusmods.com/"]'),'Safe author link should remain available.');
         expect(!window.__uiInjected,'Author script executed.');
       });
-      await check('changelog and requirement content render',()=>{
-        $('[data-detail-tab="changelog"]').click();expect($('#detail-tab-body').innerText.includes('2.0'),'Changelog version missing.');
+      await check('dictionary changelogs sort latest first and keep author note order',()=>{
+        $('[data-detail-tab="changelog"]').click();
+        const versions=$$('.changelog-entry h3').map(el=>el.textContent.replace(/^Version /,''));
+        expect(JSON.stringify(versions)===JSON.stringify(['10','2','2.0','1.10.1','1.10','v1.10-rc.10','v1.10-rc.2','1.10-beta.2','1.10-alpha.1','1.9']),'Changelogs should use descending versions, including numeric object keys, multi-digit components, v prefixes, and previews.');
+        const release=$$('.changelog-entry').find(el=>el.querySelector('h3').textContent==='Version 2.0');
+        expect(JSON.stringify([...release.querySelectorAll('li')].map(el=>el.textContent))===JSON.stringify(['Fixes a bug','New dependency']),'Sorting releases must preserve the author\'s note order.');
+        expect(release.querySelector('strong')?.textContent==='a bug','Author formatting should remain in release notes.');
+      });
+      await check('array changelogs sort latest first across release and preview formats',async()=>{
+        const original=fakeDetails.changelogs;
+        try{
+          fakeDetails.changelogs=[
+            {version:'v1.9',changes:['Older release']},
+            {version:'1.10-beta.2',changes:['Beta release']},
+            {version:'v1.10+build.2',changes:['Stable release']},
+            {version:'1.10-rc.2',changes:['Second release candidate']},
+            {version:'1.10-rc.10',changes:['Tenth release candidate']},
+            {version:'1.10-alpha.1',changes:['Alpha release']},
+            {name:'2.0',changelog:[{text:'First author note'},{description:'Second author note'}]}
+          ];
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="changelog"]').click();
+          const versions=$$('.changelog-entry h3').map(el=>el.textContent.replace(/^Version /,''));
+          expect(JSON.stringify(versions)===JSON.stringify(['2.0','v1.10+build.2','1.10-rc.10','1.10-rc.2','1.10-beta.2','1.10-alpha.1','v1.9']),'Array changelogs should use the same version order, treating build metadata as a stable release.');
+          expect(JSON.stringify([...$('.changelog-entry').querySelectorAll('li')].map(el=>el.textContent))===JSON.stringify(['First author note','Second author note']),'Array release notes must retain their author order.');
+        }finally{fakeDetails.changelogs=original;}
+      });
+      await check('requirement content renders',()=>{
         $('[data-detail-tab="requirements"]').click();expect($('#detail-tab-body').innerText.includes('Required framework'),'Requirement missing.');
       });
       $('#detail-close').click();

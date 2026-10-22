@@ -245,6 +245,20 @@
       when.textContent=at?`Last downloaded ${date(at,true)}`:'';when.classList.toggle('hidden',!at);
     }
   }
+  const versionCollator=new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
+  function compareChangelogVersions(a,b){
+    const parse=value=>String(value).trim().replace(/^v(?=\d)/i,'').split('+')[0].match(/^(\d+(?:\.\d+)*)(.*)$/);
+    const first=parse(a),second=parse(b);
+    if(first&&second){
+      const left=first[1].split('.').map(Number),right=second[1].split('.').map(Number);
+      for(let i=0;i<Math.max(left.length,right.length);i++){const difference=(right[i]||0)-(left[i]||0);if(difference)return difference;}
+      const leftSuffix=first[2].replace(/^[\s._-]+/,''),rightSuffix=second[2].replace(/^[\s._-]+/,'');
+      // The release precedes its previews; numeric suffixes put rc.10 before rc.2.
+      if(!leftSuffix||!rightSuffix)return leftSuffix?1:rightSuffix?-1:0;
+      return versionCollator.compare(rightSuffix,leftSuffix);
+    }
+    return versionCollator.compare(String(b),String(a));
+  }
   function renderDetailTab(){
     if(!detail)return;const el=$('#detail-tab-body');if(!el)return;const mod=detail.mod;
     if(detailTab==='overview')el.innerHTML=`${mod.summary?`<p class="detail-summary">${esc(mod.summary)}</p>`:''}<div class="rich-text">${richText(mod.description)||'<p>No description provided. Open the mod on Nexus for more information.</p>'}</div><div style="margin-top:22px"><button class="button small" data-open-mod="true">Open on Nexus ${icon('arrow')}</button><button class="text-button remove-mod-link" data-remove-mod="${esc(modKey(mod))}">Remove from local library</button></div>`;
@@ -257,6 +271,7 @@
     }
     if(detailTab==='changelog'){
       const entries=Array.isArray(detail.changelogs)?detail.changelogs.map(c=>[c.version??c.name??'Update',c.changes??c.changelog??c.description??c.text]):Object.entries(detail.changelogs||{});
+      entries.sort((a,b)=>compareChangelogVersions(a[0],b[0]));
       el.innerHTML=entries.length?entries.map(([version,changes])=>`<article class="changelog-entry"><h3>Version ${esc(version)}</h3><div class="rich-text">${Array.isArray(changes)?`<ul>${changes.map(c=>`<li>${richText(typeof c==='string'?c:c.text??c.description??'')}</li>`).join('')}</ul>`:richText(changes)}</div></article>`).join(''):'<p class="subtle-empty">The author hasn’t published a changelog through the API. Check the description and the mod page for release notes or pinned instructions.</p><button class="button small" data-open-mod="true">Open on Nexus '+icon('arrow')+'</button>';
     }
     if(detailTab==='requirements'){
