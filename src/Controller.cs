@@ -161,7 +161,7 @@ namespace NexusM
                 return Store.PublicState();
             }
             finally {
-                clearingDownloadFolder = false; Store.State.Remove("clearingDownloadFolder");
+                clearingDownloadFolder = false; Store.State["clearingDownloadFolder"] = false;
                 if (!disposed) { Store.Save(); Emit(); window.NextAuthorization(); }
             }
         }

@@ -491,7 +491,9 @@ namespace NexusM
                 Expect(Directory.Exists(folder) && Directory.GetFiles(folder).Length == 0, "Cleanup removed the folder or left direct files behind.");
                 Expect(File.ReadAllText(nestedFile) == "nested fixture", "Cleanup changed a subfolder's contents.");
                 Expect(Directory.GetFiles(recycled).Length == 3, "Fixture recycle destination did not retain the files.");
-                Expect(!Data.Bool(storage.State, "clearingDownloadFolder") && !Data.Bool(result, "clearingDownloadFolder"), "Successful cleanup retained the busy state.");
+                ExpectCleanupIdle(result, "Successful cleanup response");
+                ExpectCleanupIdle(storage.PublicState(), "Successful cleanup public state");
+                ExpectCleanupIdle(Data.Json.DeserializeObject(File.ReadAllText(Path.Combine(storage.Root, "state.json"))), "Successful cleanup saved state");
                 Expect(Data.Json.Serialize(storage.Mods) == modsBefore && Data.Json.Serialize(storage.Downloads) == queueBefore && Data.Json.Serialize(Data.Get(storage.State, "fileDownloads")) == filesBefore,
                     "Folder cleanup changed the queue, per-file flags, or mod dates and review state.");
             });
@@ -508,9 +510,10 @@ namespace NexusM
             WithController(storage, delegate(Controller controller)
             {
                 int confirmations = 0, recycles = 0;
-                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmations++; return false; }, delegate(string path) { recycles++; });
+                object result = controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmations++; return false; }, delegate(string path) { recycles++; });
                 Expect(confirmations == 1 && recycles == 0 && File.ReadAllText(archive) == "keep fixture", "Declining cleanup changed a file.");
-                Expect(!Data.Bool(storage.State, "clearingDownloadFolder"), "Declined cleanup retained the busy state.");
+                ExpectCleanupIdle(result, "Declined cleanup response");
+                ExpectCleanupIdle(storage.PublicState(), "Declined cleanup public state");
                 storage.Settings["downloadFolder"] = CleanupFolder(storage, "empty");
                 controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmations++; return true; }, delegate(string path) { recycles++; });
                 Expect(confirmations == 1 && recycles == 0, "An empty download folder prompted for confirmation or recycled a file.");
@@ -590,18 +593,27 @@ namespace NexusM
                 try { controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { throw new IOException("Fixture confirmation failure"); }, delegate(string path) { throw new Exception("Recycling must not follow a failed confirmation."); }); }
                 catch (IOException) { threw = true; }
                 Expect(threw && !Data.Bool(storage.State, "clearingDownloadFolder") && File.Exists(first) && File.Exists(second), "Confirmation failure changed files or left cleanup busy.");
+                ExpectCleanupIdle(storage.PublicState(), "Confirmation failure public state");
+                ExpectCleanupIdle(Data.Json.DeserializeObject(File.ReadAllText(Path.Combine(storage.Root, "state.json"))), "Confirmation failure saved state");
                 int processed = 0;
-                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { return true; }, delegate(string path)
+                object result = controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { return true; }, delegate(string path)
                 {
                     processed++;
                     if (path == second) throw new IOException("Fixture locked file");
                     File.Move(path, Path.Combine(recycled, Path.GetFileName(path)));
                 });
                 Expect(processed == 2 && !File.Exists(first) && File.ReadAllText(second) == "optional fixture", "Partial recycling did not retain the failed file and move the successful file.");
-                Expect(!Data.Bool(storage.State, "clearingDownloadFolder"), "Partial recycle failure left cleanup busy.");
+                ExpectCleanupIdle(result, "Partial recycle failure response");
+                ExpectCleanupIdle(storage.PublicState(), "Partial recycle failure public state");
                 controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { return true; }, delegate(string path) { File.Move(path, Path.Combine(recycled, Path.GetFileName(path))); });
                 Expect(!File.Exists(second) && !Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup could not run again after a partial failure.");
             });
+        }
+
+        private static void ExpectCleanupIdle(object state, string description)
+        {
+            object busy = Data.Get(state, "clearingDownloadFolder");
+            Expect(busy is bool && !(bool)busy, description + " must include an explicit false to unlock merged UI state.");
         }
 
         private static void AssertNoCredential(string text, string credential, string description)
