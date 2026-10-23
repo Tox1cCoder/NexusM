@@ -92,6 +92,10 @@
           requests.push(message);
           queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{}}));
         }
+        else if(message.action==='openUrl'){
+          requests.push(message);
+          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:null}));
+        }
         else queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:false,error:'Mutation blocked by UI fixture.'}));
       };
       window.NexusM.setState(fixture);
@@ -342,6 +346,14 @@
         window.NexusM.navigate('settings');
         expect($('#api-key').type==='password'&&!$('#api-key').value,'The saved secret must not be sent to the UI.');
         expect($('#browse-folder-button')&&$('#clear-cache-button')&&$('#register-nxm-button'),'A required settings control is missing.');
+      });
+      await check('API key link opens the official Nexus page through the external-browser action',async()=>{
+        const link=$('#get-key-button'),before=requests.filter(r=>r.action==='openUrl').length;
+        expect(link.tagName==='A'&&link.href==='https://www.nexusmods.com/users/myaccount?tab=api','Settings should expose a usable link to the official Nexus API page.');
+        link.querySelector('svg').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));await settle();
+        const opened=requests.filter(r=>r.action==='openUrl');
+        expect(opened.length===before+1&&opened[opened.length-1].payload.url==='https://www.nexusmods.com/users/myaccount?tab=api','Clicking the link icon should request the Nexus API page in the external browser.');
+        expect($('#page-settings').classList.contains('active')&&!$('#api-key').value,'Opening the website should keep Settings visible and the saved key out of the input.');
       });
       await check('typed download folder survives live state updates and saves without an added subfolder',async()=>{
         window.NexusM.setState({settings:fixture.settings});

@@ -50,7 +50,7 @@ namespace NexusM
                 {
                     var request = Data.Map(Data.Json.DeserializeObject(e.WebMessageAsJson));
                     object response = Data.Str(request, "action") == "getState"
-                        ? Data.Obj("id", Data.Get(request, "id"), "ok", true, "result", Data.Obj("games", new object[0], "mods", new object[0], "downloads", new object[0], "settings", Data.Obj("hasApiKey", false, "downloadFolder", root, "yourGamesOnly", true), "clearingDownloadFolder", false))
+                        ? Data.Obj("id", Data.Get(request, "id"), "ok", true, "result", Data.Obj("games", new object[0], "mods", new object[0], "downloads", new object[0], "user", null, "fileDownloads", Data.Obj(), "settings", Data.Obj("hasApiKey", false, "downloadFolder", "C:\\Downloads\\NexusM", "yourGamesOnly", true), "clearingDownloadFolder", false))
                         : Data.Obj("id", Data.Get(request, "id"), "ok", false, "error", "Host mutations are blocked by the offline UI harness.");
                     browser.CoreWebView2.PostWebMessageAsJson(Data.Json.Serialize(response));
                 };
@@ -68,7 +68,7 @@ namespace NexusM
                 }
                 passed = Data.Str(result, "status") == "complete" && Data.Bool(result, "passed");
                 File.WriteAllText(report, Data.Json.Serialize(Data.Obj("passed", passed, "checks", Data.Get(result, "checks"))));
-                await browser.ExecuteScriptAsync("window.NexusM.navigate('settings')");
+                await browser.ExecuteScriptAsync("document.querySelector('.toasts').replaceChildren(); window.NexusM.navigate('settings')");
                 using (var image = File.Create(Path.ChangeExtension(report, ".png")))
                     await browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);
             }

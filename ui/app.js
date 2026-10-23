@@ -179,7 +179,6 @@
     const connected=!!(state.user || state.settings.hasApiKey);
     $('#connection-badge').textContent=state.user?'Connected':state.settings.hasApiKey?'Key saved':'Not connected';$('#connection-badge').classList.toggle('current',!!state.user);
     $('#api-key').placeholder=connected?'A key is saved. Paste here to replace it.':'Paste a personal Nexus API key';
-    $('#key-help').textContent='Stored locally on this computer. Never included in exports.';
     $('#download-folder').value=downloadFolderDraft??state.settings.downloadFolder??'';
     if($('#cache-size'))$('#cache-size').textContent=state.settings.cacheSizeMB!=null?`${Number(state.settings.cacheSizeMB).toFixed(1)} MB cached. Images can be fetched again.`:'Images can be fetched again when you open the app.';
     renderDownloadControls();
@@ -331,7 +330,6 @@
       'clear-cache-button':()=>run('clearCache',{},target,'Image cache cleared.'),
       'register-nxm-button':()=>run('registerNxm',{},target,'NexusM now handles Nexus download links on this Windows account.'),
       'mark-reviewed-button':async()=>{if(!detail)return;const result=await run('markReviewed',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod)},target);if(result!==null){detail.mod={...detail.mod,needsReview:false};toast('Marked reviewed. Your download date stays the same.');target.innerHTML=`${icon('check')}Reviewed`;target.disabled=true;}},
-      'get-key-button':()=>openUrl('https://www.nexusmods.com/users/myaccount?tab=api'),
       'export-button':()=>run('exportData',{},target),
       'dialog-close':()=>$('#input-dialog').close(),'dialog-cancel':()=>$('#input-dialog').close(),
       'dialog-website-import':async()=>{const result=await run('importWebsite',{kind:'history',...(activeGame?{gameDomain:activeGame}:{})},target);if(result!==null){$('#input-dialog').close();toast('The Nexus history window is open. Sign in and use its import button.');}},
