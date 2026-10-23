@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -20,18 +21,19 @@ namespace NexusM
             string report = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(root, "folder-cleanup-tests.json");
             try
             {
-                Check("top-level archives and partials move while subfolders and their files remain", TopLevelFiles);
+                Check("the default cleanup permanently deletes files without adding them to the Recycle Bin", DefaultDeletion);
+                Check("top-level archives and partials are deleted while subfolders and their files remain", TopLevelFiles);
                 Check("a plan exposes an immutable snapshot and excludes files added later", PlanSnapshot);
-                Check("empty and missing dedicated folders need no creation or recycling", EmptyFolders);
+                Check("empty and missing dedicated folders need no creation or deletion", EmptyFolders);
                 Check("drive, profile, library, Windows, and application roots are protected", ProtectedRoots);
                 Check("relative, network, device, and alternate-stream paths are rejected", InvalidPaths);
                 Check("provided application, state, and workspace paths are protected in both directions", ProvidedProtection);
                 Check("a changed, missing, or replaced candidate remains untouched", ChangedFiles);
-                Check("a replaced folder prevents recycling any replacement files", ChangedFolder);
-                Check("folder validation repeats after every moved file", ChangedDuringRecycle);
-                Check("a failed file does not prevent other snapshot files from moving", PartialFailure);
+                Check("a replaced folder prevents deleting any replacement files", ChangedFolder);
+                Check("folder validation repeats after every deleted file", ChangedDuringDeletion);
+                Check("a failed file does not prevent other snapshot files from being deleted", PartialFailure);
                 Check("cancellation stops immediately and reports remaining files", Cancellation);
-                Check("a recycler that leaves the file behind is not reported successful", NoOpRecycler);
+                Check("a delete action that leaves the file behind is not reported successful", NoOpDeletion);
                 Check("file links and linked folder ancestors are protected when Windows allows test links", ReparsePoints);
             }
             catch (Exception error) { checks.Add(new { name = "Harness failure", passed = false, error = error.ToString() }); }
@@ -58,10 +60,9 @@ namespace NexusM
         private static string Folder(string name) { string path = Path.Combine(root, name); Directory.CreateDirectory(path); return path; }
         private static string Put(string folder, string name, string content = "fixture archive") { string path = Path.Combine(folder, name); File.WriteAllText(path, content); return path; }
         private static DownloadFolderPlan Plan(string folder) { return DownloadFolderCleanup.Prepare(folder, new string[0]); }
-        private static Action<string> Recycler(string name)
+        private static Action<string> Deleter()
         {
-            string destination = Folder(name);
-            return delegate(string path) { File.Move(path, Path.Combine(destination, Path.GetFileName(path))); };
+            return File.Delete;
         }
         private static void Reject(string folder, params string[] protectedPaths)
         {
@@ -78,9 +79,66 @@ namespace NexusM
             string nested = Folder("top-level\\keep"); string retained = Put(nested, "nested.zip");
             DownloadFolderPlan plan = Plan(folder);
             Expect(plan.Files.Count == 4 && plan.Folder == folder, "The snapshot did not contain the four direct files.");
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, Recycler("recycled-top-level"));
-            Expect(result.Moved == 4 && result.Failed == 0 && result.Skipped == 0 && !result.Cancelled, "Incorrect top-level recycle result.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, Deleter());
+            Expect(result.Deleted == 4 && result.Failed == 0 && result.Skipped == 0 && !result.Cancelled, "Incorrect top-level delete result.");
             Expect(File.Exists(retained) && Directory.Exists(folder), "A subfolder or the download folder itself was removed.");
+        }
+
+        private static List<string> RecycledFixtureFiles(string folder)
+        {
+            object shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application"));
+            object bin = null, items = null;
+            var paths = new List<string>();
+            try
+            {
+                bin = shell.GetType().InvokeMember("NameSpace", BindingFlags.InvokeMethod, null, shell, new object[] { 10 });
+                if (bin == null) throw new InvalidOperationException("Recycle Bin enumeration is required for this fixture.");
+                items = bin.GetType().InvokeMember("Items", BindingFlags.InvokeMethod, null, bin, null);
+                int count = Convert.ToInt32(items.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, items, null));
+                for (int index = 0; index < count; index++)
+                {
+                    object item = items.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, items, new object[] { index });
+                    try
+                    {
+                        string original = Convert.ToString(item.GetType().InvokeMember("ExtendedProperty", BindingFlags.InvokeMethod, null, item, new object[] { "System.Recycle.DeletedFrom" }));
+                        if (String.Equals(original, folder, StringComparison.OrdinalIgnoreCase))
+                            paths.Add(Convert.ToString(item.GetType().InvokeMember("Path", BindingFlags.GetProperty, null, item, null)));
+                    }
+                    finally { Marshal.FinalReleaseComObject(item); }
+                }
+            }
+            finally
+            {
+                if (items != null) Marshal.FinalReleaseComObject(items);
+                if (bin != null) Marshal.FinalReleaseComObject(bin);
+                Marshal.FinalReleaseComObject(shell);
+            }
+            return paths;
+        }
+
+        private static void DefaultDeletion()
+        {
+            string folder = Folder("default-delete");
+            string archive = Put(folder, "permanent-fixture.zip");
+            try
+            {
+                DownloadFolderCleanup.Delete(Plan(folder));
+                Expect(!File.Exists(archive), "Default cleanup left the file in the download folder.");
+                Expect(RecycledFixtureFiles(folder).Count == 0, "Default cleanup moved the file to the Recycle Bin instead of permanently deleting it.");
+            }
+            finally
+            {
+                // Remove only this exact fixture's recycled files if the regression fails.
+                string recycleRoot = Path.Combine(Path.GetPathRoot(folder), "$Recycle.Bin") + Path.DirectorySeparatorChar;
+                foreach (string path in RecycledFixtureFiles(folder))
+                {
+                    string absolute = Path.GetFullPath(path), name = Path.GetFileName(path);
+                    if (!absolute.StartsWith(recycleRoot, StringComparison.OrdinalIgnoreCase) || !name.StartsWith("$R", StringComparison.Ordinal))
+                        throw new InvalidOperationException("Unsafe recycled fixture cleanup path.");
+                    File.Delete(absolute);
+                    File.Delete(Path.Combine(Path.GetDirectoryName(absolute), "$I" + name.Substring(2)));
+                }
+            }
         }
 
         private static void PlanSnapshot()
@@ -90,8 +148,8 @@ namespace NexusM
             bool immutable = false;
             try { plan.Files.Add(later); } catch (NotSupportedException) { immutable = true; }
             Expect(immutable, "The confirmed file snapshot can be mutated.");
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, Recycler("recycled-snapshot"));
-            Expect(result.Moved == 1 && File.Exists(later), "A file added after confirmation was recycled.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, Deleter());
+            Expect(result.Deleted == 1 && File.Exists(later), "A file added after confirmation was deleted.");
         }
 
         private static void EmptyFolders()
@@ -101,8 +159,8 @@ namespace NexusM
             foreach (string folder in new[] { empty, missing })
             {
                 DownloadFolderPlan plan = Plan(folder);
-                DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, delegate { calls++; });
-                Expect(plan.Files.Count == 0 && result.Moved == 0 && result.Failed == 0 && result.Skipped == 0, "An empty folder did not produce an empty result.");
+                DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, delegate { calls++; });
+                Expect(plan.Files.Count == 0 && result.Deleted == 0 && result.Failed == 0 && result.Skipped == 0, "An empty folder did not produce an empty result.");
             }
             Expect(calls == 0 && !Directory.Exists(missing), "An empty/missing folder was changed.");
         }
@@ -145,8 +203,8 @@ namespace NexusM
             File.Move(missing, Path.Combine(Folder("outside-changed"), "missing.zip"));
             File.WriteAllText(changed, "a different replacement file that was never confirmed");
             int calls = 0;
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, delegate { calls++; });
-            Expect(calls == 0 && result.Moved == 0 && result.Skipped == 2 && result.Failed == 0 && File.Exists(changed), "Changed files reached the recycler.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, delegate { calls++; });
+            Expect(calls == 0 && result.Deleted == 0 && result.Skipped == 2 && result.Failed == 0 && File.Exists(changed), "Changed files reached deletion.");
         }
 
         private static void ChangedFolder()
@@ -157,39 +215,39 @@ namespace NexusM
             Directory.CreateDirectory(folder); string replacement = Put(folder, "same-name.zip");
             Directory.SetCreationTimeUtc(folder, DateTime.UtcNow.AddDays(-2));
             int calls = 0;
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, delegate { calls++; });
-            Expect(calls == 0 && result.Skipped == 1 && File.Exists(replacement), "A replacement directory's file reached the recycler.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, delegate { calls++; });
+            Expect(calls == 0 && result.Skipped == 1 && File.Exists(replacement), "A replacement directory's file reached deletion.");
         }
 
-        private static void ChangedDuringRecycle()
+        private static void ChangedDuringDeletion()
         {
             string folder = Folder("changed-during"); Put(folder, "a.zip"); string remaining = Put(folder, "b.zip");
-            DownloadFolderPlan plan = Plan(folder); Action<string> recycle = Recycler("recycled-changed-during");
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, delegate(string path) { recycle(path); Directory.SetCreationTimeUtc(folder, DateTime.UtcNow.AddDays(-3)); });
-            Expect(result.Moved == 1 && result.Skipped == 1 && File.Exists(remaining), "Folder identity was not revalidated between files.");
+            DownloadFolderPlan plan = Plan(folder); Action<string> delete = Deleter();
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, delegate(string path) { delete(path); Directory.SetCreationTimeUtc(folder, DateTime.UtcNow.AddDays(-3)); });
+            Expect(result.Deleted == 1 && result.Skipped == 1 && File.Exists(remaining), "Folder identity was not revalidated between files.");
         }
 
         private static void PartialFailure()
         {
             string folder = Folder("partial-failure"); Put(folder, "a.zip"); string failed = Put(folder, "b.zip"); Put(folder, "c.part");
-            Action<string> recycle = Recycler("recycled-partial-failure");
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(Plan(folder), delegate(string path) { if (path == failed) throw new IOException("fixture access failure"); recycle(path); });
-            Expect(result.Moved == 2 && result.Failed == 1 && result.Skipped == 0 && File.Exists(failed), "A partial failure did not retain its file and continue.");
+            Action<string> delete = Deleter();
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(Plan(folder), delegate(string path) { if (path == failed) throw new IOException("fixture access failure"); delete(path); });
+            Expect(result.Deleted == 2 && result.Failed == 1 && result.Skipped == 0 && File.Exists(failed), "A partial failure did not retain its file and continue.");
         }
 
         private static void Cancellation()
         {
             string folder = Folder("cancellation"); Put(folder, "a.zip"); string cancelled = Put(folder, "b.zip"), untouched = Put(folder, "c.zip");
-            Action<string> recycle = Recycler("recycled-cancellation");
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(Plan(folder), delegate(string path) { if (path == cancelled) throw new OperationCanceledException(); recycle(path); });
-            Expect(result.Moved == 1 && result.Failed == 0 && result.Skipped == 2 && result.Cancelled && File.Exists(cancelled) && File.Exists(untouched), "Cancellation did not stop subsequent moves.");
+            Action<string> delete = Deleter();
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(Plan(folder), delegate(string path) { if (path == cancelled) throw new OperationCanceledException(); delete(path); });
+            Expect(result.Deleted == 1 && result.Failed == 0 && result.Skipped == 2 && result.Cancelled && File.Exists(cancelled) && File.Exists(untouched), "Cancellation did not stop subsequent deletes.");
         }
 
-        private static void NoOpRecycler()
+        private static void NoOpDeletion()
         {
             string folder = Folder("no-op"); string file = Put(folder, "archive.zip");
-            DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(Plan(folder), delegate { });
-            Expect(result.Moved == 0 && result.Failed == 1 && File.Exists(file), "An unchanged file was reported as recycled.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(Plan(folder), delegate { });
+            Expect(result.Deleted == 0 && result.Failed == 1 && File.Exists(file), "An unchanged file was reported as deleted.");
         }
 
         private static void ReparsePoints()
@@ -213,8 +271,8 @@ namespace NexusM
                 File.Move(ordinary, Path.Combine(target, "ordinary.zip"));
                 Expect(CreateSymbolicLink(ordinary, targetFile, 2) || CreateSymbolicLink(ordinary, targetFile, 0), "Creating the replacement test link failed.");
                 int calls = 0;
-                DownloadFolderCleanupResult result = DownloadFolderCleanup.Recycle(plan, delegate { calls++; });
-                Expect(calls == 0 && result.Skipped == 1 && File.Exists(targetFile), "A file replaced with a link reached the recycler.");
+                DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, delegate { calls++; });
+                Expect(calls == 0 && result.Skipped == 1 && File.Exists(targetFile), "A file replaced with a link reached deletion.");
             }
             if (!directorySupported || !fileSupported) Console.WriteLine("Windows did not allow all symbolic-link fixtures; supported cases were checked.");
         }

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
-using Microsoft.VisualBasic.FileIO;
 
 namespace NexusM
 {
@@ -27,7 +26,7 @@ namespace NexusM
 
     internal sealed class DownloadFolderCleanupResult
     {
-        internal int Moved { get; set; }
+        internal int Deleted { get; set; }
         internal int Failed { get; set; }
         internal int Skipped { get; set; }
         internal bool Cancelled { get; set; }
@@ -61,10 +60,10 @@ namespace NexusM
             return new DownloadFolderPlan(absolute, protectedFolders, created, snapshots);
         }
 
-        internal static DownloadFolderCleanupResult Recycle(DownloadFolderPlan plan, Action<string> recycle = null)
+        internal static DownloadFolderCleanupResult Delete(DownloadFolderPlan plan, Action<string> delete = null)
         {
             if (plan == null) throw new ArgumentNullException("plan");
-            recycle = recycle ?? RecycleFile;
+            delete = delete ?? File.Delete;
             var result = new DownloadFolderCleanupResult();
             for (int index = 0; index < plan.Files.Count; index++)
             {
@@ -84,8 +83,8 @@ namespace NexusM
                         result.Skipped++;
                         continue;
                     }
-                    recycle(path);
-                    if (!File.Exists(path)) result.Moved++;
+                    delete(path);
+                    if (!File.Exists(path)) result.Deleted++;
                     else result.Failed++;
                 }
                 catch (OperationCanceledException)
@@ -101,11 +100,6 @@ namespace NexusM
                 catch (System.Security.SecurityException) { result.Failed++; }
             }
             return result;
-        }
-
-        private static void RecycleFile(string path)
-        {
-            FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin, UICancelOption.ThrowException);
         }
 
         private static string CanonicalFolder(string folder)

@@ -136,7 +136,7 @@ namespace NexusM
             if (transfers.Count > 0 || pending.Count > 0 || Store.Downloads.Any(x => !finished.Contains(Data.Str(x, "status"))))
                 throw new InvalidOperationException("Finish or cancel pending downloads before clearing the download folder.");
         }
-        internal object ClearDownloadFolder(Func<DownloadFolderPlan, bool> confirm = null, Action<string> recycle = null) {
+        internal object ClearDownloadFolder(Func<DownloadFolderPlan, bool> confirm = null, Action<string> delete = null) {
             RequireFolderAvailable(); RequireIdleDownloads();
             var plan = DownloadFolderCleanup.Prepare(Folder, new[] { Store.Root, AppDomain.CurrentDomain.BaseDirectory });
             if (plan.Files.Count == 0) {
@@ -146,17 +146,17 @@ namespace NexusM
             clearingDownloadFolder = true; Store.State["clearingDownloadFolder"] = true; Emit();
             try {
                 bool approved = confirm != null ? confirm(plan) : MessageBox.Show(window,
-                    "Move " + plan.Files.Count + " files from this folder to the Recycle Bin?\n\n" + plan.Folder +
-                    "\n\nThis includes downloaded archives, unfinished downloads, and other files directly in this folder. Subfolders and your download history will be kept.",
+                    "Permanently delete " + plan.Files.Count + " files from this folder?\n\n" + plan.Folder +
+                    "\n\nThis bypasses the Recycle Bin and cannot be undone. It includes downloaded archives, unfinished downloads, and other files directly in this folder. Subfolders and your download history will be kept.",
                     "Clear download folder", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
                 if (!approved) return Store.PublicState();
                 if (disposed) throw new OperationCanceledException();
                 RequireIdleDownloads();
-                var result = DownloadFolderCleanup.Recycle(plan, recycle);
-                Store.State["notice"] = "Moved " + result.Moved + " files to the Recycle Bin." +
+                var result = DownloadFolderCleanup.Delete(plan, delete);
+                Store.State["notice"] = "Permanently deleted " + result.Deleted + (result.Deleted == 1 ? " file." : " files.") +
                     (result.Cancelled ? " Cleanup was cancelled." : "") +
-                    (result.Failed > 0 ? " " + result.Failed + " files could not be moved." : "") +
-                    (result.Skipped > 0 ? " " + result.Skipped + " files were skipped." : "") +
+                    (result.Failed > 0 ? " " + result.Failed + (result.Failed == 1 ? " file could" : " files could") + " not be deleted." : "") +
+                    (result.Skipped > 0 ? " " + result.Skipped + (result.Skipped == 1 ? " file was" : " files were") + " skipped." : "") +
                     " Subfolders and download history were kept.";
                 return Store.PublicState();
             }

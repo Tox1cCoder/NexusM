@@ -276,7 +276,7 @@
         window.NexusM.setState({downloads:[],clearingDownloadFolder:false});
         expect(!$('#clear-download-folder-button').disabled,'Archives can remain on disk after the visible list is cleared.');
         expect($('#clear-downloads-button').disabled,'An empty list should still disable Clear list.');
-        expect($('#clear-download-folder-button').title.includes('Recycle Bin after confirmation'),'The folder control should describe its confirmation and destination.');
+        expect($('#clear-download-folder-button').title.includes('Permanently deletes files after confirmation'),'The folder control should describe its confirmation and destination.');
         expect($('.download-cleanup-note').textContent.includes('Clear list removes entries only'),'The two cleanup actions need a visible distinction.');
       });
       await check('folder cleanup dispatches only its action and preserves file flags and history',async()=>{
