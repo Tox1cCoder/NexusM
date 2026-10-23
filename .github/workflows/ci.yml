@@ -1,0 +1,98 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Optional release tag, which must match the executable version
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    name: Build, test and package
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build Windows app
+        run: .\build.ps1
+
+      - name: Ensure WebView2 Runtime is installed
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Test-WebView2 {
+            $locations = @(
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+              'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+            )
+            foreach ($location in $locations) {
+              $version = (Get-ItemProperty -LiteralPath $location -Name pv -ErrorAction SilentlyContinue).pv
+              if ($version -and [version]$version -gt [version]'0.0.0.0') { return $true }
+            }
+            return $false
+          }
+          if (!(Test-WebView2)) {
+            $installer = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebView2Setup.exe'
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+              throw 'The WebView2 installer does not have a valid Microsoft signature.'
+            }
+            $process = Start-Process -FilePath $installer -ArgumentList '/silent', '/install' -WindowStyle Hidden -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw ('WebView2 installation failed: ' + $process.ExitCode) }
+            if (!(Test-WebView2)) { throw 'WebView2 Runtime is still unavailable after installation.' }
+          }
+
+      - name: Run offline test suites
+        run: |
+          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'Refresh', 'FreeDownloadFlow', 'UI', 'Package')) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File ('.\tests\Test-' + $suite + '.ps1')
+            if ($LASTEXITCODE -ne 0) { throw ($suite + ' tests failed.') }
+          }
+
+      - name: Package portable download
+        env:
+          NEXUSM_RELEASE_TAG: ${{ inputs.release-tag }}
+        run: .\tools\Package-Release.ps1 -Tag $env:NEXUSM_RELEASE_TAG | Format-List
+
+      - name: Upload portable app and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nexusm-windows-x64
+          path: |
+            artifacts/release/*.zip
+            artifacts/release/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload fixture reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: offline-test-reports
+          path: |
+            artifacts/*-tests.json
+            artifacts/ui-tests.png
+          if-no-files-found: ignore
+          retention-days: 7
