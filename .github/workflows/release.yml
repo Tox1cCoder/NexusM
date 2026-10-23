@@ -1,0 +1,53 @@
+name: GitHub Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verify release build
+    uses: ./.github/workflows/ci.yml
+    with:
+      release-tag: ${{ github.ref_name }}
+
+  publish:
+    name: Publish portable Windows app
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified app and checksum
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nexusm-windows-x64
+          path: release
+
+      - name: Verify checksum and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum --check -- *.sha256)
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          Download the **NexusM Windows x64 ZIP**, extract it, and open `NexusM.exe`. Keep all extracted files together.
+
+          Requirements: .NET Framework 4.8 (or compatible newer version) and Microsoft Edge WebView2 Runtime. See the included README for setup, Nexus API keys, and everyday use.
+
+          The accompanying `.sha256` file verifies the ZIP download. This portable build does not bundle runtimes or personal account data.
+          NOTES
+          gh release create "$RELEASE_TAG" release/*.zip release/*.sha256 \
+            --verify-tag --title "NexusM ${RELEASE_TAG#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes --latest

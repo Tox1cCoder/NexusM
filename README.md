@@ -2,6 +2,10 @@
 
 NexusM is a small Windows app for checking Nexus Mods updates, reading release notes, and downloading the exact mod files you want. You install the downloaded archives yourself. Closing the app stops it; there is no background service.
 
+**[Download the latest Windows release](https://github.com/Tox1cCoder/NexusM/releases/latest)** · [Build and test status](https://github.com/Tox1cCoder/NexusM/actions/workflows/ci.yml)
+
+Download `NexusM-<version>-windows-x64.zip` from **Assets** and extract it before opening the app. The automatically generated **Source code** downloads contain source only. A matching `.sha256` file is available to check the ZIP's integrity.
+
 ## What you need
 
 - A 64-bit Windows PC.
@@ -116,6 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
 ```
 
 Optional read-only live API checks use your locally encrypted key:
@@ -127,6 +132,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
 `Test-ModBatch.ps1 -Live` checks live pagination; `Test-Refresh.ps1 -Live` checks an isolated copy of your library. The account-dependent `--smoke-test` mode additionally checks live mod details, images, and protocol capture. No test initiates a real Nexus archive download. Reports and screenshots go in `artifacts`, which is excluded from source control.
 
 The icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-Icon.ps1` before rebuilding.
+
+### CI and publishing releases
+
+GitHub Actions builds, runs all offline suites, and packages the app on pushes to `main`, pull requests, and manual **Windows CI** runs. Each successful run has a `nexusm-windows-x64` artifact containing the portable ZIP and checksum. No personal Nexus API key or repository secret is required.
+
+To publish a new version:
+
+1. Update `AssemblyVersion` and `AssemblyFileVersion` in `src\AssemblyInfo.cs`, and the Settings version in `ui\index.html` as needed. For example, app version `1.3.1.0` uses tag `v1.3.1`.
+2. Commit and push the changes, then wait for **Windows CI** to pass.
+3. Create and push the matching version tag:
+
+   ```powershell
+   git tag -a v1.3.1 -m "NexusM 1.3.1"
+   git push origin v1.3.1
+   ```
+
+The **GitHub Release** workflow runs the same Windows checks again, verifies the tag matches the executable version, then publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases). Build jobs have read-only repository access; only the publishing job can create a release.
+
+For a local package after building, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Package-Release.ps1`. Output goes to `artifacts\release`. Packaging uses an explicit app-file list and refuses to overwrite an existing package; choose a fresh `-OutputDirectory` for another local run.
 
 ---
 
