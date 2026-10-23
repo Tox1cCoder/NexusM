@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -121,6 +121,58 @@ return {ok:true,headers:{get:()=> 'application/json'},json:async()=>({data:rows}
                     Expect(Get(item, "gameDomain") == "baldursgate3" && Convert.ToInt32(item["modId"]) == 987, "Modern URL parsed incorrectly.");
                     Expect(Get(item, "name") == "A & B", "HTML name was not decoded.");
                     Expect(item["lastDownloadedUtc"] == null, "Unknown dates must remain unknown.");
+                });
+
+                await Check("raw array history names stay inert", async delegate
+                {
+                    string script = @"
+const payload='<img src=/missing-history-array onerror=window.__historyPayloadRan=true>';
+const rows=[[1792368000,payload,1792281600,'Author','Gameplay','',0,3474,987,'baldursgate3']];
+window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({data:rows})});";
+                    await LoadFixture("security-array", "<script>" + script + "</script>", false, true);
+                    Dictionary<string, object> state = await Import("");
+                    Expect(Get(state, "status") == "complete", "Synthetic history import failed.");
+                    await Task.Delay(300);
+                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Raw array name executed an image error handler in the signed-in origin.");
+                });
+
+                await Check("raw object history names stay inert", async delegate
+                {
+                    string script = @"
+const payload='<img src=/missing-history-object onerror=window.__historyPayloadRan=true>';
+window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({data:[{game_domain_name:'baldursgate3',mod_id:987,name:payload}]})});";
+                    await LoadFixture("security-object", "<script>" + script + "</script>", false, true);
+                    Dictionary<string, object> state = await Import("");
+                    Expect(Get(state, "status") == "complete", "Synthetic history import failed.");
+                    await Task.Delay(300);
+                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Raw object name executed an image error handler in the signed-in origin.");
+                });
+
+                await Check("escaped link text is not reinterpreted as active HTML", async delegate
+                {
+                    string row = HtmlRow("/games/baldursgate3/mods/987", "&lt;img src=/missing-history-encoded onerror=window.__historyPayloadRan=true&gt;");
+                    await LoadFixture("security-escaped", BaseTable(row) + "<script>window.fetch=async()=>({ok:false,status:401});</script>", false, true);
+                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Payload ran before import.");
+                    Dictionary<string, object> state = await Import("");
+                    Expect(Get(state, "status") == "complete", "Synthetic history import failed.");
+                    await Task.Delay(300);
+                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Escaped link text was decoded then executed during import.");
+                    Expect(Get((Dictionary<string, object>)Items(state)[0], "name") == "<img src=/missing-history-encoded onerror=window.__historyPayloadRan=true>", "Literal link text should remain readable without being reparsed as HTML.");
+                });
+
+                await Check("endpoint HTML cells stay inert through row and image extraction", async delegate
+                {
+                    string script = @"
+const html='<a href=/games/baldursgate3/mods/987>Safe name</a><img src=/missing-history-html onerror=window.__historyPayloadRan=(window.__historyPayloadRan||0)+1>';
+const rows=[[html,'2026-10-18T14:44:00Z','Author','Gameplay','2026-10-19T01:02:00Z','']];
+window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({data:rows})});";
+                    await LoadFixture("security-html-cells", "<script>" + script + "</script>", false, true);
+                    Expect(await browser.ExecuteScriptAsync("!!window.__historyPayloadRan") == "false", "Payload ran before import.");
+                    Dictionary<string, object> state = await Import("");
+                    Expect(Get(state, "status") == "complete" && Items(state).Length == 1, "Synthetic HTML history import failed.");
+                    await Task.Delay(300);
+                    string activations = await browser.ExecuteScriptAsync("window.__historyPayloadRan||0");
+                    Expect(activations == "0", "Endpoint HTML executed image error handlers " + activations + " times during row/image extraction.");
                 });
 
                 await Check("untrusted page is rejected before any fetch", async delegate

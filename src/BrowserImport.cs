@@ -44,11 +44,14 @@ namespace NexusM
     const seen = new Map();
     const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     const validDomain = value => /^[a-z0-9_-]+$/i.test(String(value || ''));
-    const plain = value => {
-        const el = document.createElement('div');
-        el.innerHTML = String(value == null ? '' : value);
-        return (el.textContent || '').replace(/\s+/g, ' ').trim();
+    const parseHtml = value => {
+        // Template contents stay inert: imported images and event handlers must not run.
+        const template = document.createElement('template');
+        template.innerHTML = String(value == null ? '' : value);
+        return template.content;
     };
+    const normalizeText = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    const plain = value => normalizeText(parseHtml(value).textContent);
     const dateIso = value => {
         if (value == null || value === '') return null;
         if (typeof value === 'object') {
@@ -71,8 +74,7 @@ namespace NexusM
         return date.toISOString();
     };
     const safeImage = html => {
-        const el = document.createElement('div');
-        el.innerHTML = html;
+        const el = parseHtml(html);
         const image = el.querySelector('img');
         if (!image) return '';
         try {
@@ -110,8 +112,7 @@ namespace NexusM
             };
         }
         const html = Array.isArray(row) ? row.map(value => String(value == null ? '' : value)).join(' ') : String(row || '');
-        const el = document.createElement('div');
-        el.innerHTML = html;
+        const el = parseHtml(html);
         const links = Array.from(el.querySelectorAll('a[href]'));
         for (const link of links) {
             let url;
@@ -122,7 +123,7 @@ namespace NexusM
             const downloaded = columns && columns.downloaded != null ? columns.downloaded : 1;
             const updated = columns && columns.updated != null ? columns.updated : 4;
             return {
-                gameDomain: match[1], modId: Number(match[2]), name: plain(link.textContent),
+                gameDomain: match[1], modId: Number(match[2]), name: normalizeText(link.textContent),
                 lastDownloadedUtc: dateIso(cells[downloaded]), updatedUtc: dateIso(cells[updated]), thumbnailUrl: safeImage(html)
             };
         }
@@ -131,7 +132,7 @@ namespace NexusM
     const tableColumns = table => {
         const columns = {};
         Array.from(table.querySelectorAll('thead th')).forEach((header, index) => {
-            const title = plain(header.textContent).toLowerCase();
+            const title = normalizeText(header.textContent).toLowerCase();
             if (/last\s*(dl|download)|downloaded/.test(title)) columns.downloaded = index;
             if (/updated/.test(title)) columns.updated = index;
         });
@@ -142,7 +143,7 @@ namespace NexusM
         if (!jq || !jq.fn || !jq.fn.dataTable) return null;
         const tables = Array.from(jq.fn.dataTable.tables());
         for (const table of tables) {
-            const headers = plain(table.querySelector('thead') ? table.querySelector('thead').textContent : '');
+            const headers = normalizeText(table.querySelector('thead') ? table.querySelector('thead').textContent : '');
             if (!/last\s*dl|downloaded|download history/i.test(headers)) continue;
             const api = jq(table).DataTable();
             const settings = api.settings()[0];
@@ -175,7 +176,7 @@ namespace NexusM
     const visibleRows = () => {
         const rows = [];
         for (const table of document.querySelectorAll('table')) {
-            const headers = plain(table.querySelector('thead') ? table.querySelector('thead').textContent : '');
+            const headers = normalizeText(table.querySelector('thead') ? table.querySelector('thead').textContent : '');
             if (!/last\s*dl|downloaded|download history/i.test(headers)) continue;
             const columns = tableColumns(table);
             for (const row of table.querySelectorAll('tbody tr')) {
