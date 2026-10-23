@@ -1,46 +1,113 @@
 # NexusM
 
-A small Windows desktop app for checking Nexus Mods updates, reading release information, selecting individual files, and saving archives for manual installation. Nothing runs after you close the app.
+NexusM is a small Windows app for checking Nexus Mods updates, reading release notes, and downloading the exact mod files you want. You install the downloaded archives yourself. Closing the app stops it; there is no background service.
 
-## Run
+## What you need
 
-Open `dist\NexusM.exe`. Keep the other files in `dist` beside it. The portable app is about 1.3 MB and uses .NET Framework 4.8 and Microsoft Edge WebView2 Runtime. These components are commonly already installed on Windows. Browser profile data and downloaded archives are separate from that size.
+- A 64-bit Windows PC.
+- A Nexus Mods account and your personal API key. Free accounts can download through the normal Nexus website steps and countdown.
+- [.NET Framework 4.8](https://dotnet.microsoft.com/en-us/download/dotnet-framework/net48) or a compatible newer version, and [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/). Install these if the app asks for them.
 
-Enter your personal Nexus Mods API key under **Settings**. NexusM reuses a key already configured for the current Windows account and encrypts it with Windows DPAPI in `%LOCALAPPDATA%\NexusM\api-key.bin`. The key is never embedded in the executable, source, library backup, or download sidecar. Each Windows account configures its own key.
+## Quick start
 
-1. Your saved library appears immediately when the app opens. NexusM then syncs your favourite games and checks your known mods automatically, with progress shown while you browse. Add/remove games locally as needed; local additions and exclusions survive syncing. **Your games only** filters the library and update checks to this list by default. Turn it off to see/check all imported mods, including older games; selecting one game still narrows the table to that game. Removing a game preserves its history for later. These controls do not change your favourites on the website.
-2. Click **Import history → Open Nexus history**, sign in in the window, wait for Download history to load, and click **Import history** in that window. Select All games or a specific game. This step discovers which mods belong in your library.
-3. Current metadata loads automatically after a history import. Use **Check for updates** whenever you want another check during the same session. NexusM fetches metadata and your account's last download dates together in batches of up to 80 mods, including downloads made outside the app. Up to four requests run at once, and the list updates as results arrive. Missing or inaccessible mods retain their previous information. A newer mod update is a prompt to review, because it may affect an optional file you do not use.
-4. Open a mod to read its description, changelogs, requirements, and individual file cards. Multiple main files and optional files remain separate. Each exact file shows a **Downloaded** flag and its last download date when recorded; the flag updates immediately when a download finishes. Older browser downloads without file-level history show **No download recorded**. **Mark reviewed** dismisses the current update without changing your download date.
-5. Click **Get this file**, or select several files and click **Download selected**. NexusM handles the website's normal free-download controls and countdown automatically in its embedded browser, then receives the authorized `nxm://` link and saves the archive in your chosen folder. The browser stays out of the way unless Nexus needs sign-in, cookie preferences, a browser check, or manual help. Installation is manual.
+1. **Open the app.** Run `NexusM.exe` from the app folder (`dist\NexusM.exe` when built from source). Keep its DLLs, configuration file, and `ui` folder beside it. If you only have source code, see [Build from source](#build-from-source).
+2. **Connect your account.** Open **Settings → Nexus connection → Get your Nexus API key**. This opens the [official Nexus API page](https://www.nexusmods.com/users/myaccount?tab=api) in your web browser. Sign in, copy your **Personal API Key**, paste it into NexusM, and select **Save & connect**.
+3. **Choose a download folder.** Under **Settings → Download location**, type a full path or select **Browse**, then **Save location**. The default is `%USERPROFILE%\Downloads\NexusM`. A custom path such as `D:\Mod Archives` is used directly.
+4. **Import your mods.** Select **Import history → Open Nexus history**. Sign in inside the Nexus window, wait for Download history to load, choose **All games** or one game, and press **Import history** in that window.
+5. **Browse your library.** NexusM loads current mod information after importing. Select a mod to see its files, overview, changelog, and requirements.
 
-**Settings → Download location** accepts a typed folder path or a folder selected with **Browse**. Click **Save location** to use it for future downloads and keep it across app restarts. The default is `%USERPROFILE%\Downloads\NexusM`; a custom path such as `D:\Downloads` is used directly, without adding a `NexusM` subfolder.
+You can also use **Add mod** to paste a Nexus mod-page link, or **Import tracked mods** in the import dialog.
 
-Downloads queue sequentially. Cancel/closing the app keeps a `.part` file; Retry obtains fresh website authorization and resumes when the server supports it. Completed archives are not overwritten. Each file downloaded through NexusM gets its own local download record. Imported website history contains mod-level dates, not historical per-file markers. **Downloads → Clear list** removes finished, failed, cancelled, interrupted, and waiting entries. Active/queued transfers remain, and clearing never deletes archives, partial files, or saved download dates. Waiting website windows close with their removed entries.
+## Check for updates
 
-**Downloads → Clear download folder** shows the selected folder and file count for confirmation, then moves files directly in that folder to the Windows Recycle Bin, including unfinished downloads and their sidecars. Subfolders, download records, and downloaded-file flags stay. Finish or cancel pending downloads first. Use a dedicated folder on a local fixed drive; personal library roots and NexusM's own application/data folders cannot be cleared.
+Your saved library appears when the app opens. Once connected, NexusM syncs your favourite games and checks known mods automatically. Use **Check for updates** to check again while the app is open.
 
-The embedded Nexus window captures download links without changing your Windows protocol settings. **Settings → Handle Nexus download links** optionally makes NexusM the default `nxm://` handler for links clicked in your normal browser; this replaces the current handler.
+- **Your games only** shows and checks mods for the games in your game list. Turn it off to include imported history for other games.
+- Select a game to narrow the list and update check to that game.
+- **Needs review** means the mod changed after your last download or review. Open it and read the author's notes; the change may concern an optional file you do not use.
+- **Mark reviewed** dismisses the current update without changing your download date.
 
-## History and author information
+Adding or removing a game changes your local list. It keeps the game's mod history and does not change your favourites on the Nexus website.
 
-Nexus does not expose complete download-history enumeration in its public API. Import uses the signed-in website's own history table/read-only history request, then normal API calls handle update checks. It imports all available table rows and clearly reports when only the visible page could be read. New mods downloaded outside NexusM require another history import or **Add mod**.
+New mods downloaded outside NexusM need another history import or **Add mod**. Update checks can retrieve newer account download dates for mods already in your library.
 
-The website importer has fixture coverage, but its live operation requires signing in and can be affected by website changes or browser challenges. If necessary, use the provided **Open in browser** option, then import saved HTML/JSON or paste mod links. Plain links/HTML fallback may lack reliable downloaded dates; Check for updates retrieves those dates for the known mods when Nexus exposes them.
+## Download a mod file
 
-Requirements are author-provided metadata. Read descriptions/changelogs and use **Open on Nexus** for pinned posts and instructions such as removing old versions. The app does not infer installation steps or track installed mods.
+1. Open a mod and read its **Overview**, **Changelog**, and **Requirements**.
+2. In **Files**, choose **Get this file**, or select several files and choose **Download selected**. Main files and optional files are listed separately.
+3. NexusM opens the website's normal download flow and handles its free-download controls and countdown. Sign in, choose cookie preferences, or complete a browser check if a Nexus window needs your attention.
+4. Follow progress under **Downloads**. Use **Open download folder** to find the completed archives, then install them using the author's instructions or your mod manager.
 
-Library/download records live in `%LOCALAPPDATA%\NexusM\state.json`. The WebView profile preserves website sign-in; HTTP image caching is limited to approximately 16 MB. WebView profile databases add their own storage. **Settings → Clear cache** clears browser cache while retaining sign-in. **Export** creates a library/history backup without credentials; **Import** merges it back, including per-file download history and review dates.
+Downloads run one at a time. Cancelling a download or closing the app keeps its partial file. **Retry** gets fresh authorization and resumes when the server supports it. Existing completed archives are not overwritten.
 
-## Build and verify
+**Downloaded** flags record exact files downloaded through NexusM; they do not mean a mod is installed. Older website history may have a mod-level download date without a per-file flag.
 
-No Node, Electron, SDK installation, or bundled browser is needed. The build uses Windows' C# compiler and downloads the pinned Microsoft WebView2 SDK package into `%LOCALAPPDATA%\NexusM-BuildCache`.
+### Links from your normal browser
 
-The app icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-Icon.ps1` to update `src\app.ico` before building. The Windows executable and app windows use the embedded icon; the sidebar and Settings use the SVG.
+NexusM captures `nxm://` links inside its own Nexus window automatically. To handle links clicked in your usual browser too, choose **Settings → Handle Nexus download links → Set NexusM as handler**. This replaces your Windows account's current `nxm://` handler, including another mod manager if one is configured.
+
+## Free up space
+
+| Action | What it does | What it keeps |
+| --- | --- | --- |
+| **Downloads → Clear list** | Removes finished, failed, cancelled, interrupted, and waiting entries. Waiting authorization windows close. | Archives, partial files, download history, and active or queued transfers. |
+| **Downloads → Clear download folder** | **Permanently deletes the confirmed files directly in your download folder**, including archives, partial downloads, sidecars, and any other files there. It bypasses the Recycle Bin. | Subfolders and their contents, download records, and Downloaded flags. |
+| **Settings → Clear cache** | Clears cached browser content and images, which can be fetched again. | Website sign-in, your library, and downloaded archives. |
+
+**Permanent deletion cannot be undone in the app or through the Recycle Bin.** Check the folder path and file count in the confirmation before continuing. This is normal file deletion, not secure data erasure.
+
+Finish or cancel pending downloads before clearing the folder. Use a dedicated folder on a local fixed drive. Drive roots, personal library roots, linked folders, Windows folders, and NexusM's application/data folders are protected. Files added or changed after the confirmation snapshot are skipped; files that cannot be deleted are reported so you can address them and try again.
+
+## Back up or restore your library
+
+- **Back up:** choose **Settings → Library & history → Export** and save the JSON file.
+- **Restore:** choose **Settings → Library & history → Import**, select a NexusM JSON backup, and import it. Records merge with your existing library.
+
+Backups include games, mod history, review dates, and per-file download records. They do not include your API key, website sign-in, or archive files. They can contain local file paths and your mod history, so they are not anonymous.
+
+## Your data and API key
+
+NexusM stores app data under `%LOCALAPPDATA%\NexusM`. Paste that path into File Explorer to open it.
+
+| Location | Contents |
+| --- | --- |
+| `api-key.bin` | Your API key, encrypted with Windows DPAPI for the current Windows account. |
+| `state.json` | Your local library, settings, and download records. This file is not encrypted. |
+| `WebView` | Embedded browser data, including the Nexus website sign-in session. |
+| Your chosen download folder | Completed archives and unfinished downloads with their small resume sidecars. |
+
+The saved API key is not sent back to the app's UI or included in library backups or download sidecars. API requests send it to `api.nexusmods.com` over HTTPS; archive servers do not receive it. Each Windows account configures its own key. Keep the app-data folder private because it also contains your website session.
+
+## Troubleshooting
+
+| Problem | Try this |
+| --- | --- |
+| The app will not open, or reports a missing runtime | Keep all app files together. Install or repair WebView2 Runtime and .NET Framework using the links above. |
+| Nexus rejects the API key | Copy your current Personal API Key again and select **Save & connect** in Settings. |
+| History import finds nothing | Sign in inside the Nexus window, open Download history, wait for the table, and press that window's **Import history** button. |
+| Only part of the history imports | NexusM reports when only visible rows were available. Import the other pages too, or import saved HTML/JSON through the import dialog. |
+| A mod is missing from the library | Turn off **Your games only**, import history again, or use **Add mod**. |
+| A download stalls or its link expires | Complete any sign-in/browser challenge, then use **Retry** or **Get this file** for fresh authorization. The free-account countdown still applies. |
+| Clear download folder is unavailable | Finish or cancel pending downloads. Check that the saved location is a dedicated local folder outside protected paths. |
+| Nexus is unavailable or rate-limits requests | Browse the saved library and try checking again later. Previous mod information is retained when requests fail. |
+
+Website changes can affect history import and free-download automation. **Open in browser** lets you continue on Nexus. Requirements and installation instructions come from mod authors; read the mod page and pinned posts when something is unclear.
+
+## Build from source
+
+From the project folder, run this in Windows PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
+```
+
+Then open `dist\NexusM.exe`. The build uses Windows' C# compiler and downloads a pinned Microsoft WebView2 SDK into `%LOCALAPPDATA%\NexusM-BuildCache`. Node, Electron, and a bundled browser are not required. The app files are about 1.3 MB, excluding runtimes, browser data, and downloads.
+
+### Developer checks
+
+After building, these suites use isolated fixtures and need no Nexus account. The UI suite runs the real WebView UI without using your saved profile or API key.
+
+```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Backend.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryImport.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
@@ -48,14 +115,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCleanup.p
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1
 ```
 
-`-Test` performs read-only live API checks with the locally encrypted key. Other suites use isolated fixtures and do not need a Nexus account. `Test-ModBatch.ps1 -Live` additionally verifies live batch pagination; `Test-Refresh.ps1 -Live` measures a full update check against an isolated copy of your library without changing your saved data. The UI smoke test runs the real WebView window, its bridge, and `tests\ui-checks.js`:
+Optional read-only live API checks use your locally encrypted key:
 
 ```powershell
-Start-Process .\dist\NexusM.exe -ArgumentList '--smoke-test', "$PWD\artifacts\ui-smoke.json" -Wait
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
 ```
 
-Reports and screenshots are under `artifacts` (excluded from source control). No tests initiate a real Nexus archive download.
+`Test-ModBatch.ps1 -Live` checks live pagination; `Test-Refresh.ps1 -Live` checks an isolated copy of your library. The account-dependent `--smoke-test` mode additionally checks live mod details, images, and protocol capture. No test initiates a real Nexus archive download. Reports and screenshots go in `artifacts`, which is excluded from source control.
 
-Official references: [v1 client](https://github.com/Nexus-Mods/node-nexus-api), [GraphQL documentation](https://graphql.nexusmods.com/), [WebView2](https://learn.microsoft.com/microsoft-edge/webview2/). Independent personal app; not affiliated with Nexus Mods.
+The icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-Icon.ps1` before rebuilding.
+
+---
+
+NexusM is an independent app and is not affiliated with Nexus Mods.
