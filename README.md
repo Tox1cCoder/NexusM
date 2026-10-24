@@ -145,13 +145,15 @@ GitHub Actions builds, runs all offline suites, and packages the app on pushes t
 
 To publish a new version:
 
-1. Update `AssemblyVersion` and `AssemblyFileVersion` in `src\AssemblyInfo.cs`, and the Settings version in `ui\index.html`. For example, app version `1.5.0.0` publishes as `v1.5.0`.
+1. Update `AssemblyVersion` and `AssemblyFileVersion` in `src\AssemblyInfo.cs`, and the Settings version in `ui\index.html`. For example, app version `1.5.1.0` publishes as `v1.5.1`.
 2. Commit and push the changes to `main`.
 3. **Windows CI** builds and tests that commit, verifies the package checksum, creates the matching version tag, and publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases).
 
 Pushing more changes without changing the app version still runs CI but leaves an already published release unchanged. Use a new version for a new downloadable release. Pull requests and manual CI runs build and test without publishing. Build jobs have read-only repository access; only the publishing job can create a tag or release using GitHub's built-in workflow token.
 
 Manually pushing a matching `v<version>` tag is also supported by the same pipeline. A tag that does not match the built version, or an unpublished tag already pointing at a different commit, stops publishing. Existing tags and published assets are never moved or overwritten. A failed asset upload leaves a draft; rerun the failed publishing job after resolving the error so it reuses the original verified build artifact.
+
+If fixing the publisher itself requires a new commit after a failed run already created a tag, use a new app version for that commit. Rerunning the old workflow still uses its old script. Version `1.5.1` includes the empty-draft asset-list fix and can publish without changing the tag or draft left by the failed `1.5.0` run. Publisher fixtures run on both Windows PowerShell and Linux PowerShell before publishing.
 
 For a local package after building, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Package-Release.ps1`. Output goes to `artifacts\release`. Packaging uses an explicit app-file list and refuses to overwrite an existing package; choose a fresh `-OutputDirectory` for another local run.
 
