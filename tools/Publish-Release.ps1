@@ -79,7 +79,10 @@ The accompanying `.sha256` file verifies the ZIP download. This portable build d
         $release = & $Request 'POST' ($base + '/releases') @{ tag_name = $package.Tag; target_commitish = $Commit; name = 'NexusM ' + $package.Version; body = $notes; draft = $true; prerelease = $false; generate_release_notes = $true } $null $null
     }
     if ($null -eq $release -or !$release.draft -or [long]$release.id -le 0) { throw 'GitHub did not provide a draft release for the verified app.' }
-    $assets = @(& $Request 'GET' ($base + '/releases/' + $release.id + '/assets?per_page=100') $null $null $null | Where-Object { $null -ne $_ })
+    # REST JSON arrays arrive as one pipeline object. Enumerate the assigned value
+    # before validating individual assets; an empty draft must contain zero assets.
+    $assetResponse = & $Request 'GET' ($base + '/releases/' + $release.id + '/assets?per_page=100') $null $null $null
+    $assets = @($assetResponse | Where-Object { $null -ne $_ })
     $expected = @{}
     foreach ($path in @($package.Archive, $package.Checksum)) {
         $file = Get-Item -LiteralPath $path

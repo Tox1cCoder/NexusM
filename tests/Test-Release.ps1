@@ -1,7 +1,7 @@
 param()
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot
-. (Join-Path $workspace 'tools\Publish-Release.ps1')
+. (Join-Path $workspace 'tools/Publish-Release.ps1')
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('NexusM-ReleaseTests-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 $script:checks = 0
@@ -27,7 +27,7 @@ function New-Package([string]$name) {
     return $directory
 }
 function New-Server {
-    return @{ Calls = (New-Object 'Collections.Generic.List[object]'); Published = $false; Ref = $null; Release = $null; Assets = @(); Annotated = @{}; FailUpload = $false; BadUpload = $false }
+    return @{ Calls = (New-Object 'Collections.Generic.List[object]'); Published = $false; Ref = $null; Release = $null; Assets = @(); EnumerateAssets = $false; Annotated = @{}; FailUpload = $false; BadUpload = $false }
 }
 function Request-For($server) {
     return {
@@ -38,7 +38,12 @@ function Request-For($server) {
         if ($method -eq 'GET' -and $path -like '*/git/tags/*') { return $server.Annotated[($path.Split('/')[-1])] }
         if ($method -eq 'POST' -and $path -like '*/git/refs') { $server.Ref = @{ object = @{ type = 'commit'; sha = $body.sha } }; return $server.Ref }
         if ($method -eq 'POST' -and $path -like '*/releases') { $server.Release = @{ id = 42; draft = $true; html_url = 'https://github.com/fixture/repo/releases/tag/v1.5.0' }; return $server.Release }
-        if ($method -eq 'GET' -and $path -like '*/releases/42/assets?per_page=100') { return $server.Assets }
+        if ($method -eq 'GET' -and $path -like '*/releases/42/assets?per_page=100') {
+            if ($server.EnumerateAssets) { return $server.Assets }
+            # Invoke-RestMethod sends JSON arrays as one pipeline object, including [].
+            Write-Output -NoEnumerate $server.Assets
+            return
+        }
         if ($method -eq 'POST' -and $path.StartsWith('https://uploads.github.com/')) {
             if ($server.FailUpload) { throw 'Fixture upload failed.' }
             $asset = @{ name = (Split-Path $file -Leaf); size = (Get-Item -LiteralPath $file).Length; digest = 'sha256:' + (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -74,7 +79,7 @@ try {
     Assert-ReleaseRejected { Invoke-NexusMRelease -Repository 'fixture/repo' -Commit 'main' -PackageDirectory $directory -Request (Request-For (New-Server)) } 'Release tags must target an exact tested commit rather than a moving branch'
 
     $server = New-Server; $result = Publish-With $server $directory
-    Assert-Release ($result.Status -eq 'Published' -and $server.Published -and $server.Assets.Count -eq 2) 'A new version publishes its ZIP and checksum after both uploads verify'
+    Assert-Release ($result.Status -eq 'Published' -and $server.Published -and $server.Assets.Count -eq 2) 'An empty REST asset array permits a new version to publish its ZIP and checksum'
     $tagCall = @($server.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -like '*/git/refs' })[0]
     Assert-Release ($tagCall.Body.ref -eq 'refs/tags/v1.5.0' -and $tagCall.Body.sha -eq $commit) 'The automatic version tag points at the tested commit'
     $create = @($server.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -like '*/releases' })[0]
@@ -103,20 +108,35 @@ try {
     Assert-Release (!$server.Published) 'Unverified uploaded bytes remain hidden in the draft'
     $server = New-Server; $server.Ref = @{ object = @{ type = 'commit'; sha = $commit } }; $server.Release = @{ id = 42; draft = $true; html_url = 'fixture' }
     $server.Assets = @((Fixture-Asset $package.Archive)); $result = Publish-With $server $directory
-    Assert-Release ($result.Status -eq 'Published' -and @($server.Calls | Where-Object { $_.Path.StartsWith('https://uploads.github.com/') }).Count -eq 1) 'Rerunning a partial draft uploads only its missing verified asset'
+    Assert-Release ($result.Status -eq 'Published' -and @($server.Calls | Where-Object { $_.Path.StartsWith('https://uploads.github.com/') }).Count -eq 1) 'A singleton REST asset array reuses the verified asset and uploads only the missing checksum'
+    $server = New-Server; $server.Ref = @{ object = @{ type = 'commit'; sha = $commit } }; $server.Release = @{ id = 42; draft = $true; html_url = 'fixture' }
+    $server.Assets = @((Fixture-Asset $package.Archive), (Fixture-Asset $package.Checksum)); $result = Publish-With $server $directory
+    Assert-Release ($result.Status -eq 'Published' -and @($server.Calls | Where-Object { $_.Method -eq 'POST' }).Count -eq 0) 'A complete REST asset array publishes the verified draft without uploading duplicates'
+    $server = New-Server; $server.EnumerateAssets = $true; $server.Ref = @{ object = @{ type = 'commit'; sha = $commit } }; $server.Release = @{ id = 42; draft = $true; html_url = 'fixture' }
+    $server.Assets = @((Fixture-Asset $package.Archive), (Fixture-Asset $package.Checksum)); $result = Publish-With $server $directory
+    Assert-Release ($result.Status -eq 'Published') 'An already enumerated asset response remains supported'
+    foreach ($scenario in @('unexpected', 'duplicate')) {
+        $server = New-Server; $server.Ref = @{ object = @{ type = 'commit'; sha = $commit } }; $server.Release = @{ id = 42; draft = $true }
+        $asset = Fixture-Asset $package.Archive
+        if ($scenario -eq 'unexpected') { $asset.name = 'unexpected.zip'; $server.Assets = @($asset) }
+        else { $server.Assets = @($asset, (Fixture-Asset $package.Archive)) }
+        Assert-ReleaseRejected { Publish-With $server $directory } ($scenario + ' REST asset names prevent publishing')
+        Assert-Release (!$server.Published -and @($server.Calls | Where-Object { $_.Method -ne 'GET' }).Count -eq 0) ($scenario + ' draft assets are left unchanged')
+    }
     $server = New-Server; $server.Ref = @{ object = @{ type = 'commit'; sha = $commit } }; $server.Release = @{ id = 42; draft = $true }; $asset = Fixture-Asset $package.Archive; $asset.digest = 'sha256:wrong'; $server.Assets = @($asset)
     Assert-ReleaseRejected { Publish-With $server $directory } 'Existing draft assets are never overwritten with different bytes'
     Assert-Release (!$server.Published -and @($server.Calls | Where-Object { $_.Method -ne 'GET' }).Count -eq 0) 'A mismatched draft is left unchanged'
 
-    $workflow = Get-Content -LiteralPath (Join-Path $workspace '.github\workflows\ci.yml') -Raw
-    Assert-Release ($workflow -match 'branches: \[main\]' -and $workflow -match "tags: \['v\*'\]" -and $workflow -match 'needs: build') 'Main pushes and manual version tags share the build-before-publish pipeline'
+    $workflow = Get-Content -LiteralPath (Join-Path $workspace '.github/workflows/ci.yml') -Raw
+    Assert-Release ($workflow -match 'branches: \[main\]' -and $workflow -match "tags: \['v\*'\]" -and $workflow -match 'needs: \[build, release-tests\]') 'Main pushes and manual version tags require both the verified build and Linux publisher tests'
+    Assert-Release ($workflow -match '(?s)  release-tests:.*?runs-on: ubuntu-latest.*?shell: pwsh.*?run:.*?tests/Test-Release.ps1') 'Publisher fixtures also run under the production Linux PowerShell runtime'
     Assert-Release ($workflow -match "if: github.event_name == 'push' && \(github.ref == 'refs/heads/main'" -and $workflow -match 'persist-credentials: false') 'Pull requests cannot run the publishing job or retain checkout credentials'
     Assert-Release ($workflow -match "cancel-in-progress: \`$\{\{ github.event_name == 'pull_request' \}\}" -and $workflow -match 'group: publish-\$\{\{ needs.build.outputs.release_tag \}\}') 'Main releases cannot be cancelled halfway through publishing and duplicate versions are serialized'
     Write-Host ('Passed ' + $script:checks + ' release automation checks; no real GitHub requests were made.')
 }
 finally {
     $absolute = [IO.Path]::GetFullPath($testRoot)
-    $temporary = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\NexusM-ReleaseTests-'
+    $temporary = Join-Path ([IO.Path]::GetFullPath([IO.Path]::GetTempPath())) 'NexusM-ReleaseTests-'
     if (!$absolute.StartsWith($temporary, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe release fixture cleanup path.' }
     if (Test-Path -LiteralPath $absolute) { Remove-Item -LiteralPath $absolute -Recurse -Force }
 }
