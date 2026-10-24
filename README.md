@@ -124,6 +124,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FilePreview.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Release.ps1
 ```
 
 Optional read-only live API checks use your locally encrypted key:
@@ -138,20 +139,17 @@ The icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -
 
 ### CI and publishing releases
 
-GitHub Actions builds, runs all offline suites, and packages the app on pushes to `main`, pull requests, and manual **Windows CI** runs. Each successful run has a `nexusm-windows-x64` artifact containing the portable ZIP and checksum. No personal Nexus API key or repository secret is required.
+GitHub Actions builds, runs all offline suites, and packages the app on pushes to `main`, pull requests, version tags, and manual **Windows CI** runs. Each successful build has a `nexusm-windows-x64` artifact containing the portable ZIP and checksum. No personal Nexus API key or repository secret is required.
 
 To publish a new version:
 
-1. Update `AssemblyVersion` and `AssemblyFileVersion` in `src\AssemblyInfo.cs`, and the Settings version in `ui\index.html` as needed. For example, app version `1.3.1.0` uses tag `v1.3.1`.
-2. Commit and push the changes, then wait for **Windows CI** to pass.
-3. Create and push the matching version tag:
+1. Update `AssemblyVersion` and `AssemblyFileVersion` in `src\AssemblyInfo.cs`, and the Settings version in `ui\index.html`. For example, app version `1.5.0.0` publishes as `v1.5.0`.
+2. Commit and push the changes to `main`.
+3. **Windows CI** builds and tests that commit, verifies the package checksum, creates the matching version tag, and publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases).
 
-   ```powershell
-   git tag -a v1.3.1 -m "NexusM 1.3.1"
-   git push origin v1.3.1
-   ```
+Pushing more changes without changing the app version still runs CI but leaves an already published release unchanged. Use a new version for a new downloadable release. Pull requests and manual CI runs build and test without publishing. Build jobs have read-only repository access; only the publishing job can create a tag or release using GitHub's built-in workflow token.
 
-The **GitHub Release** workflow runs the same Windows checks again, verifies the tag matches the executable version, then publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases). Build jobs have read-only repository access; only the publishing job can create a release.
+Manually pushing a matching `v<version>` tag is also supported by the same pipeline. A tag that does not match the built version, or an unpublished tag already pointing at a different commit, stops publishing. Existing tags and published assets are never moved or overwritten. A failed asset upload leaves a draft; rerun the failed publishing job after resolving the error so it reuses the original verified build artifact.
 
 For a local package after building, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Package-Release.ps1`. Output goes to `artifacts\release`. Packaging uses an explicit app-file list and refuses to overwrite an existing package; choose a fresh `-OutputDirectory` for another local run.
 

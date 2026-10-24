@@ -3,28 +3,26 @@ name: Windows CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      release-tag:
-        description: Optional release tag, which must match the executable version
-        required: false
-        type: string
-        default: ''
 
 permissions:
   contents: read
 
 concurrency:
   group: windows-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: Build, test and package
     runs-on: windows-2025
     timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.package.outputs.release_tag }}
     defaults:
       run:
         shell: powershell
@@ -65,15 +63,19 @@ jobs:
 
       - name: Run offline test suites
         run: |
-          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'Refresh', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Package')) {
+          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'Refresh', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Package', 'Release')) {
             & powershell -NoProfile -ExecutionPolicy Bypass -File ('.\tests\Test-' + $suite + '.ps1')
             if ($LASTEXITCODE -ne 0) { throw ($suite + ' tests failed.') }
           }
 
       - name: Package portable download
+        id: package
         env:
-          NEXUSM_RELEASE_TAG: ${{ inputs.release-tag }}
-        run: .\tools\Package-Release.ps1 -Tag $env:NEXUSM_RELEASE_TAG | Format-List
+          NEXUSM_RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          $package = .\tools\Package-Release.ps1 -Tag $env:NEXUSM_RELEASE_TAG
+          $package | Format-List
+          ('release_tag=v' + $package.Version) >> $env:GITHUB_OUTPUT
 
       - name: Upload portable app and checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -96,3 +98,34 @@ jobs:
             artifacts/ui-tests.png
           if-no-files-found: ignore
           retention-days: 7
+
+  publish:
+    name: Publish new app version
+    needs: build
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-${{ needs.build.outputs.release_tag }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out tested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download verified app and checksum
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nexusm-windows-x64
+          path: release
+
+      - name: Publish only unpublished versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        shell: pwsh
+        run: |
+          .\tools\Publish-Release.ps1 -Repository $env:GITHUB_REPOSITORY -Commit (git rev-parse HEAD) -PackageDirectory release -ExpectedTag $env:RELEASE_TAG
