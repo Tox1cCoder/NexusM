@@ -13,64 +13,157 @@ namespace NexusM
 {
     internal sealed class MainForm : Form
     {
-        private readonly WebView2 web = new WebView2();
+        private WebView2 web;
         internal readonly Controller Controller;
         private readonly Storage storage;
         private CoreWebView2Environment environment;
         private readonly string initialNxm, smokeReport, identity;
         private NamedPipeServerStream activePipe;
         private bool closing, smokeStarted;
+        private bool pipeStarted, initialLinkHandled;
+        private int automaticRecoveries;
+        private ulong navigationId;
+        private readonly string uiFolder;
+        private readonly bool startupFixture;
+        private readonly BrowserStartup startup = new BrowserStartup();
+        private readonly System.Windows.Forms.Timer startupTimer = new System.Windows.Forms.Timer { Interval = 500 };
+        private readonly Panel startupPanel = new Panel();
+        private readonly Label startupTitle = new Label(), startupMessage = new Label();
+        private readonly Button retryInterface = new Button();
+        internal bool InterfaceReady { get { return startup.Ready; } }
+        internal bool StartupFallbackVisible { get { return startupPanel.Visible; } }
+        internal string StartupFailure { get { return startup.Failure; } }
+        internal WebView2 InterfaceBrowser { get { return web; } }
+        protected override bool ShowWithoutActivation { get { return startupFixture || base.ShowWithoutActivation; } }
         private readonly System.Collections.Generic.List<BrowserForm> browsers = new System.Collections.Generic.List<BrowserForm>();
         private readonly System.Collections.Generic.Queue<string[]> authorizations = new System.Collections.Generic.Queue<string[]>();
         private BrowserForm authorizationBrowser;
         private string currentAuthorizationId;
-        internal MainForm(Storage store, string nxm, string smoke, string pipeIdentity) {
+        internal MainForm(Storage store, string nxm, string smoke, string pipeIdentity, string interfaceFolder = null, bool isolatedStartupFixture = false) {
             storage = store; initialNxm = nxm; smokeReport = smoke; identity = pipeIdentity;
+            uiFolder = interfaceFolder ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ui"); startupFixture = isolatedStartupFixture;
             Text = "NexusM"; Width = 1340; Height = 880; MinimumSize = new Size(980, 680); StartPosition = FormStartPosition.CenterScreen;
             BackColor = Color.FromArgb(22, 23, 27); Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            web.Dock = DockStyle.Fill; web.DefaultBackgroundColor = BackColor; Controls.Add(web);
+            CreateInterface(); CreateStartupPanel();
             Controller = new Controller(this, storage);
             Shown += async delegate { await Initialize(); };
-            FormClosing += delegate { closing = true; foreach (var browser in browsers.ToArray()) browser.Close(); Controller.Dispose(); if (activePipe != null) activePipe.Dispose(); };
+            startupTimer.Tick += delegate { CheckStartupTimeout(DateTime.UtcNow); };
+            FormClosing += delegate { closing = true; startupTimer.Stop(); startupTimer.Dispose(); foreach (var browser in browsers.ToArray()) browser.Close(); Controller.Dispose(); if (activePipe != null) activePipe.Dispose(); };
+        }
+        private void CreateInterface() {
+            web = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = BackColor };
+            Controls.Add(web); web.SendToBack();
+        }
+        private void CreateStartupPanel() {
+            startupPanel.Dock = DockStyle.Fill; startupPanel.BackColor = BackColor;
+            var contents = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 560 };
+            startupTitle.AutoSize = true; startupTitle.ForeColor = Color.White; startupTitle.Font = new Font("Segoe UI", 19F); startupTitle.Text = "Opening NexusM...";
+            startupMessage.AutoSize = true; startupMessage.MaximumSize = new Size(540, 0); startupMessage.ForeColor = Color.FromArgb(175, 180, 190); startupMessage.Font = new Font("Segoe UI", 10F); startupMessage.Margin = new Padding(0, 12, 0, 20); startupMessage.Text = "Loading your window. Your saved library will appear shortly.";
+            retryInterface.Text = "Retry"; retryInterface.Width = 140; retryInterface.Height = 36; retryInterface.Font = new Font("Segoe UI", 10F); retryInterface.Visible = false;
+            retryInterface.Click += async delegate { await RetryInterface(); };
+            contents.Controls.Add(startupTitle); contents.Controls.Add(startupMessage); contents.Controls.Add(retryInterface); startupPanel.Controls.Add(contents);
+            startupPanel.Resize += delegate { contents.Left = Math.Max(20, (startupPanel.ClientSize.Width - contents.Width) / 2); contents.Top = Math.Max(20, (startupPanel.ClientSize.Height - contents.Height) / 2); };
+            Controls.Add(startupPanel); startupPanel.BringToFront();
+        }
+        private bool CurrentInterface(WebView2 view, int generation) { return !closing && !IsDisposed && ReferenceEquals(web, view) && generation == startup.Generation && String.IsNullOrEmpty(startup.Failure); }
+        private void FailInterface(int generation, string code, string message) {
+            if (closing || IsDisposed || !startup.Fail(generation, code)) return;
+            startupTimer.Stop(); startupTitle.Text = "NexusM couldn't load its window"; startupMessage.Text = message;
+            retryInterface.Visible = true; retryInterface.Enabled = true; startupPanel.Visible = true; web.Visible = false; startupPanel.BringToFront();
+            StartupDiagnostics.Record(storage.Root, code);
+            if (smokeReport != null) { File.WriteAllText(smokeReport, Data.Json.Serialize(Data.Obj("passed", false, "error", code))); Close(); }
+        }
+        private void ReadyInterface(int generation) {
+            if (closing || IsDisposed || !startup.Complete(generation)) return;
+            startupTimer.Stop(); startupPanel.Visible = false; web.Visible = true; web.BringToFront();
+        }
+        internal void CheckStartupTimeout(DateTime now) {
+            if (startup.TimedOut(now, TimeSpan.FromSeconds(20))) FailInterface(startup.Generation, "startup-timeout", "NexusM is taking longer than expected to open its window. Select Retry to try again.");
+        }
+        internal async Task RetryInterface() {
+            if (closing || IsDisposed) return;
+            // Recreate only the main view. The controller, downloads, account,
+            // profile, and other Nexus windows keep their existing lifetimes.
+            startup.Begin(DateTime.UtcNow);
+            try {
+                var previous = web; Controls.Remove(previous); previous.Dispose(); CreateInterface();
+                await Initialize();
+            } catch (Exception) { if (!closing && !IsDisposed) FailInterface(startup.Generation, "ui-retry-failed", "The window could not be reloaded. Select Retry to try again."); }
         }
         private async Task Initialize() {
+            int generation = startup.Begin(DateTime.UtcNow); var view = web;
+            startupTitle.Text = "Opening NexusM..."; startupMessage.Text = "Loading your window. Your saved library will appear shortly.";
+            retryInterface.Visible = false; startupPanel.Visible = true; startupPanel.BringToFront(); startupTimer.Start();
             try {
+                if (!File.Exists(Path.Combine(uiFolder, "index.html"))) throw new FileNotFoundException("The NexusM interface files are missing.");
                 var options = new CoreWebView2EnvironmentOptions("--disk-cache-size=16777216 --media-cache-size=1048576");
-                environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(storage.Root, "WebView"), options);
-                await web.EnsureCoreWebView2Async(environment);
-                web.CoreWebView2.Settings.AreDevToolsEnabled = smokeReport != null;
-                web.CoreWebView2.Settings.IsStatusBarEnabled = false;
-                web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-                web.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
-                web.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
-                web.CoreWebView2.SetVirtualHostNameToFolderMapping("nexusm.local", Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ui"), CoreWebView2HostResourceAccessKind.DenyCors);
-                web.CoreWebView2.WebMessageReceived += async delegate(object sender, CoreWebView2WebMessageReceivedEventArgs e) {
+                var selectedEnvironment = environment ?? await CoreWebView2Environment.CreateAsync(null, Path.Combine(storage.Root, "WebView"), options);
+                if (!CurrentInterface(view, generation)) return; environment = selectedEnvironment;
+                await view.EnsureCoreWebView2Async(selectedEnvironment);
+                if (!CurrentInterface(view, generation)) return;
+                var core = view.CoreWebView2;
+                core.Settings.AreDevToolsEnabled = smokeReport != null || startupFixture;
+                core.Settings.IsStatusBarEnabled = false;
+                core.Settings.AreDefaultContextMenusEnabled = false;
+                core.Settings.IsGeneralAutofillEnabled = false;
+                core.Settings.IsPasswordAutosaveEnabled = false;
+                core.SetVirtualHostNameToFolderMapping("nexusm.local", uiFolder, CoreWebView2HostResourceAccessKind.DenyCors);
+                core.WebMessageReceived += async delegate(object sender, CoreWebView2WebMessageReceivedEventArgs e) {
+                    if (!ReferenceEquals(view, web) || closing) return;
                     Uri source; if (!Uri.TryCreate(e.Source, UriKind.Absolute, out source) || source.Host != "nexusm.local" || source.Scheme != "https") return;
                     object id = null;
+                    ulong requestNavigation = navigationId;
                     try {
                         var message = Data.Map(Data.Json.DeserializeObject(e.WebMessageAsJson)); id = Data.Get(message, "id");
+                        string action = Data.Str(message, "action");
+                        if (action == "uiReady") { ReadyInterface(startup.Generation); return; }
+                        if (action == "uiStartupError") { FailInterface(startup.Generation, "ui-startup-error", "The interface could not finish loading. Select Retry to load it again."); return; }
                         // Smoke tests read the real cache but never launch a whole-library update.
-                        var result = smokeReport != null && Data.Str(message, "action") == "initialize" ? storage.PublicState() : await Controller.Handle(Data.Str(message, "action"), Data.Get(message, "payload"));
+                        var result = smokeReport != null && action == "initialize" ? storage.PublicState() : await Controller.Handle(action, Data.Get(message, "payload"));
+                        if (!ReferenceEquals(view, web) || closing || requestNavigation != navigationId) return;
                         Reply(Data.Obj("id", id, "ok", true, "result", result));
-                    } catch (Exception ex) { Reply(Data.Obj("id", id, "ok", false, "error", ex.Message)); }
+                    } catch (Exception ex) { if (ReferenceEquals(view, web) && !closing && requestNavigation == navigationId) Reply(Data.Obj("id", id, "ok", false, "error", ex.Message)); }
                 };
-                web.CoreWebView2.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e) {
-                    Uri target; if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out target) || target.Scheme != "https" || target.Host != "nexusm.local") { e.Cancel = true; if (e.Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) OpenSafeUrl(e.Uri); }
+                core.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e) {
+                    if (!ReferenceEquals(view, web) || closing) { e.Cancel = true; return; }
+                    Uri target; if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out target) || target.Scheme != "https" || target.Host != "nexusm.local") { e.Cancel = true; if (e.Uri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) OpenSafeUrl(e.Uri); return; }
+                    navigationId = e.NavigationId;
+                    startup.Navigate(DateTime.UtcNow); startupTimer.Start();
                 };
-                web.CoreWebView2.NewWindowRequested += delegate(object sender, CoreWebView2NewWindowRequestedEventArgs e) { e.Handled = true; OpenSafeUrl(e.Uri); };
-                web.CoreWebView2.NavigationCompleted += async delegate(object sender, CoreWebView2NavigationCompletedEventArgs e) {
-                    if (smokeReport != null && !smokeStarted && e.IsSuccess && web.Source != null && web.Source.Host == "nexusm.local") { smokeStarted = true; await SmokeTest(); }
+                core.NewWindowRequested += delegate(object sender, CoreWebView2NewWindowRequestedEventArgs e) { e.Handled = true; OpenSafeUrl(e.Uri); };
+                core.NavigationCompleted += async delegate(object sender, CoreWebView2NavigationCompletedEventArgs e) {
+                    if (!CurrentInterface(view, generation) || e.NavigationId != navigationId) return;
+                    if (!e.IsSuccess) { FailInterface(generation, "navigation-" + e.WebErrorStatus, "The app page could not load. Select Retry to try again."); return; }
+                    if (!startup.Loading && !startup.Ready) return;
+                    try {
+                        string ready = await view.ExecuteScriptAsync("Boolean(window.NexusM && window.NexusM.ready === true)");
+                        if (!CurrentInterface(view, generation) || e.NavigationId != navigationId) return;
+                        if (ready == "true") ReadyInterface(generation);
+                        else if (!startup.Ready) { FailInterface(generation, "ui-not-ready", "The interface could not finish loading. Select Retry to load it again."); return; }
+                        if (smokeReport != null && !smokeStarted) { smokeStarted = true; await SmokeTest(); }
+                    } catch (Exception) { if (CurrentInterface(view, generation)) FailInterface(generation, "ui-ready-check-failed", "The app window stopped responding. Select Retry to load it again."); }
                 };
-                web.CoreWebView2.Navigate("https://nexusm.local/index.html");
-                if (smokeReport == null) StartPipe();
-                if (!String.IsNullOrEmpty(initialNxm)) ReceiveNxm(initialNxm);
+                core.ProcessFailed += delegate(object sender, CoreWebView2ProcessFailedEventArgs e) {
+                    if (!ReferenceEquals(view, web) || closing) return;
+                    bool browserExited = e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited;
+                    bool rendererExited = e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited;
+                    bool unresponsive = e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive;
+                    if (!browserExited && !rendererExited && !unresponsive) return;
+                    FailInterface(startup.Generation, "process-" + e.ProcessFailedKind, "The app window stopped responding. Select Retry to load it again. Your saved library and downloads are kept.");
+                    if (closing || IsDisposed) return;
+                    if (browserExited) foreach (var browser in browsers.ToArray()) browser.Close();
+                    if (!unresponsive && automaticRecoveries++ == 0) BeginInvoke(new Action(async delegate { await RetryInterface(); }));
+                };
+                core.Navigate("https://nexusm.local/index.html");
+                if (smokeReport == null && !startupFixture && !pipeStarted) { pipeStarted = true; StartPipe(); }
+                if (!startupFixture && !initialLinkHandled && !String.IsNullOrEmpty(initialNxm)) { initialLinkHandled = true; ReceiveNxm(initialNxm); }
             } catch (Exception ex) {
-                if (smokeReport != null) { File.WriteAllText(smokeReport, Data.Json.Serialize(Data.Obj("passed", false, "error", ex.Message))); Close(); return; }
-                MessageBox.Show(this, "NexusM could not open its window. Install or repair Microsoft Edge WebView2 Runtime, then try again.\n\n" + ex.Message, "NexusM", MessageBoxButtons.OK, MessageBoxIcon.Error); Close();
+                if (!CurrentInterface(view, generation)) return;
+                FailInterface(generation, ex is FileNotFoundException ? "ui-files-missing" : "webview-initialization-failed", ex is FileNotFoundException ? "The app files could not be found. Extract the complete NexusM download, then select Retry." : "The browser component could not start. Select Retry; if this repeats, install or repair Microsoft Edge WebView2 Runtime.");
             }
         }
         internal void OnUi(Action action) { if (closing || IsDisposed) return; if (InvokeRequired) { try { BeginInvoke(action); } catch { } } else action(); }
-        private void Reply(object message) { OnUi(delegate { if (web.CoreWebView2 != null) web.CoreWebView2.PostWebMessageAsJson(Data.Json.Serialize(message)); }); }
+        private void Reply(object message) { OnUi(delegate { try { if (web.CoreWebView2 != null) web.CoreWebView2.PostWebMessageAsJson(Data.Json.Serialize(message)); } catch (InvalidOperationException) { FailInterface(startup.Generation, "ui-message-failed", "The app window stopped responding. Select Retry to load it again."); } catch (System.Runtime.InteropServices.COMException) { FailInterface(startup.Generation, "ui-message-failed", "The app window stopped responding. Select Retry to load it again."); } }); }
         internal void Emit(string name, object value) { Reply(Data.Obj("event", name, "data", value)); }
         internal void OpenSafeUrl(string input) {
             Uri uri; if (!Uri.TryCreate(input, UriKind.Absolute, out uri) || (uri.Scheme != "https" && uri.Scheme != "http") || !String.IsNullOrEmpty(uri.UserInfo)) return;

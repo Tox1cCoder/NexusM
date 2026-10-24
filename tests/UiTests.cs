@@ -46,9 +46,14 @@ namespace NexusM
                     if (!Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out uri) || uri.Scheme != "https" || uri.Host != "nexusm.local")
                         e.Response = environment.CreateWebResourceResponse(new MemoryStream(new byte[0]), 403, "Fixture network blocked", "Content-Type: text/plain");
                 };
+                var interfaceReady = new TaskCompletionSource<bool>();
+                bool stateRequestedBeforeReady = false;
                 browser.CoreWebView2.WebMessageReceived += delegate(object sender, CoreWebView2WebMessageReceivedEventArgs e)
                 {
                     var request = Data.Map(Data.Json.DeserializeObject(e.WebMessageAsJson));
+                    if (Data.Str(request, "action") == "uiReady") { interfaceReady.TrySetResult(true); return; }
+                    if (Data.Str(request, "action") == "uiStartupError") { interfaceReady.TrySetResult(false); return; }
+                    if (Data.Str(request, "action") == "getState" && !interfaceReady.Task.IsCompleted) stateRequestedBeforeReady = true;
                     object response = Data.Str(request, "action") == "getState"
                         ? Data.Obj("id", Data.Get(request, "id"), "ok", true, "result", Data.Obj("games", new object[0], "mods", new object[0], "downloads", new object[0], "user", null, "fileDownloads", Data.Obj(), "settings", Data.Obj("hasApiKey", false, "downloadFolder", "C:\\Downloads\\NexusM", "yourGamesOnly", true), "clearingDownloadFolder", false))
                         : Data.Obj("id", Data.Get(request, "id"), "ok", false, "error", "Host mutations are blocked by the offline UI harness.");
@@ -58,6 +63,8 @@ namespace NexusM
                 browser.CoreWebView2.NavigationCompleted += delegate(object sender, CoreWebView2NavigationCompletedEventArgs e) { ready.TrySetResult(e.IsSuccess); };
                 browser.CoreWebView2.Navigate("https://nexusm.local/index.html");
                 if (await Task.WhenAny(ready.Task, Task.Delay(15000)) != ready.Task || !ready.Task.Result) throw new IOException("The app UI did not load.");
+                if (await Task.WhenAny(interfaceReady.Task, Task.Delay(5000)) != interfaceReady.Task || !interfaceReady.Task.Result || stateRequestedBeforeReady)
+                    throw new IOException("The app UI did not report a successful initial render before requesting its library.");
                 await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "ui-checks.js")));
                 object result = null;
                 for (int attempt = 0; attempt < 200; attempt++)
@@ -67,7 +74,9 @@ namespace NexusM
                     if (Data.Str(result, "status") == "complete") break;
                 }
                 passed = Data.Str(result, "status") == "complete" && Data.Bool(result, "passed");
-                File.WriteAllText(report, Data.Json.Serialize(Data.Obj("passed", passed, "checks", Data.Get(result, "checks"))));
+                var checks = Data.List(Data.Get(result, "checks"));
+                checks.Insert(0, Data.Obj("test", "UI readiness precedes saved-library and account work", "passed", true));
+                File.WriteAllText(report, Data.Json.Serialize(Data.Obj("passed", passed, "checks", checks)));
                 await browser.ExecuteScriptAsync("document.querySelector('.toasts').replaceChildren(); window.NexusM.navigate('settings')");
                 using (var image = File.Create(Path.ChangeExtension(report, ".png")))
                     await browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);

@@ -65,6 +65,7 @@
   async function run() {
     try {
       expect(typeof window.NexusM==='object','The application script did not initialize.');
+      expect(window.NexusM.ready===true,'The interface must finish its initial render before reporting ready.');
       snapshot=await new Promise((resolve,reject)=>{
         const id=`ui-fixture-snapshot-${Date.now()}`;
         const listener=e=>{let m=e.data;if(typeof m==='string')try{m=JSON.parse(m);}catch{return;}if(String(m?.id)!==id)return;bridge.removeEventListener('message',listener);clearTimeout(timer);m.ok===false?reject(new Error(m.error)):resolve(m.result);};

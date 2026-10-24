@@ -1,6 +1,13 @@
 /* NexusM: deliberately framework-free. All account and disk access stays in the host. */
 (() => {
   'use strict';
+  let interfaceReady=false;
+  function reportStartupError(){
+    if(interfaceReady)return;
+    try{window.chrome?.webview?.postMessage({action:'uiStartupError',payload:{message:'The app interface could not start. Reload the window to try again.'}});}catch{}
+  }
+  window.addEventListener('error',reportStartupError);
+  window.addEventListener('unhandledrejection',reportStartupError);
   const $ = (selector, scope = document) => scope.querySelector(selector);
   const $$ = (selector, scope = document) => [...scope.querySelectorAll(selector)];
   const icon = name => `<svg aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -410,7 +417,12 @@
   document.addEventListener('error',e=>{if(e.target.tagName==='IMG'){e.target.style.display='none';if(e.target.closest('.game-card'))e.target.parentElement.insertAdjacentHTML('afterbegin',`<span class="game-fallback">${icon('game')}<span>${esc(e.target.parentElement.title?.split(' · ')[0]||'Game')}</span></span>`);}},true);
 
   // Exposed for host-driven refreshes and local smoke tests, never contains the key.
-  window.NexusM={setState,receive,navigate,showMod};
-  setState(state);
-  if(window.chrome?.webview)loadLibrary();
+  window.NexusM={setState,receive,navigate,showMod,ready:false};
+  try{
+    setState(state);
+    window.NexusM.ready=true;interfaceReady=true;
+    window.removeEventListener('error',reportStartupError);window.removeEventListener('unhandledrejection',reportStartupError);
+    try{window.chrome?.webview?.postMessage({action:'uiReady'});}catch{}
+    if(window.chrome?.webview)loadLibrary();
+  }catch{reportStartupError();}
 })();

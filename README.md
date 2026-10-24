@@ -94,6 +94,7 @@ The saved API key is not sent back to the app's UI or included in library backup
 | Only part of the history imports | NexusM reports when only visible rows were available. Import the other pages too, or import saved HTML/JSON through the import dialog. |
 | A mod is missing from the library | Turn off **Your games only**, import history again, or use **Add mod**. |
 | A download stalls or its link expires | Complete any sign-in/browser challenge, then use **Retry** or **Get this file** for fresh authorization. The free-account countdown still applies. |
+| The app window stays blank or stops responding | NexusM shows a loading or recovery screen and attempts one automatic recovery after a browser crash. Select **Retry** if it cannot recover. Your saved library, sign-in, and downloads are retained. If it repeats, check `%LOCALAPPDATA%\NexusM\startup.log` for the recorded failure code. |
 | Clear download folder is unavailable | Finish or cancel pending downloads. Check that the saved location is a dedicated local folder outside protected paths. |
 | Nexus is unavailable or rate-limits requests | Browse the saved library and try checking again later. Previous mod information is retained when requests fail. |
 
@@ -123,6 +124,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FilePreview.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Startup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Release.ps1
 ```
