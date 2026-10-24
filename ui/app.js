@@ -14,6 +14,14 @@
   let lastFocus = null, lastNotice = null;
   let loadingLibrary = false, refreshPromise = null;
   let downloadFolderDraft = null;
+  const renderedHtml=new WeakMap();
+  let librarySignature='',gamesSignature='',downloadsSignature='',settingsSignature='';
+  let gameNames=new Map(),gameModCounts=new Map(),scopedLibrary=[];
+  const dateFormatter=new Intl.DateTimeFormat(undefined,{day:'numeric',month:'short',year:'numeric'});
+  const timeFormatter=new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit'});
+  const dateTimeFormatter=new Intl.DateTimeFormat(undefined,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const dateCells=new Map();
+  function setHtml(selector,html){const element=$(selector);if(renderedHtml.get(element)!==html){element.innerHTML=html;renderedHtml.set(element,html);}}
 
   function rpc(action, payload = {}) {
     const bridge = window.chrome?.webview;
@@ -98,7 +106,21 @@
     state={...state,...next,settings:{...state.settings,...next.settings}};
     state.games=Array.isArray(state.games)?state.games:[];state.mods=Array.isArray(state.mods)?state.mods:[];state.downloads=Array.isArray(state.downloads)?state.downloads:[];
     if(activeGame&&!state.games.some(g=>gameDomain(g)===activeGame))activeGame=null;
-    renderGames();renderMods();renderDownloads();renderSettings();renderCounts();renderRefresh();refreshFileDownloadFlags();
+    const nextGames=JSON.stringify(state.games);
+    const gamesChanged=nextGames!==gamesSignature;
+    const nextLibrary=JSON.stringify([nextGames,state.settings.yourGamesOnly,state.mods.map(mod=>[modDomain(mod),modId(mod),mod.name,mod.version,mod.author,mod.uploaded_by,picture(mod),timestamp(updated(mod)),timestamp(downloaded(mod)),needsReview(mod)])]);
+    const libraryChanged=nextLibrary!==librarySignature;
+    const nextDownloads=JSON.stringify(state.downloads),nextSettings=JSON.stringify([state.settings,state.user,state.clearingDownloadFolder]);
+    if(libraryChanged){
+      librarySignature=nextLibrary;gamesSignature=nextGames;
+      gameNames=new Map(state.games.map(game=>[gameDomain(game),game.name]));gameModCounts=new Map();
+      for(const mod of state.mods){const domain=modDomain(mod);gameModCounts.set(domain,(gameModCounts.get(domain)||0)+1);}
+      scopedLibrary=state.settings.yourGamesOnly===false?state.mods:state.mods.filter(mod=>gameNames.has(modDomain(mod)));
+      renderGames();renderMods();
+    }else renderCheckDate();
+    if(nextDownloads!==downloadsSignature||gamesChanged){downloadsSignature=nextDownloads;renderDownloads();}
+    if(nextSettings!==settingsSignature){settingsSignature=nextSettings;renderSettings();}
+    renderCounts();renderRefresh();renderDownloadControls();refreshFileDownloadFlags();
     if(next.notice&&next.notice!==lastNotice)toast(next.notice);
     lastNotice=next.notice||null;
   }
@@ -107,16 +129,16 @@
   const modId = mod => Number(mod.modId ?? mod.mod_id ?? mod.id);
   const fileId = file => Number(file.fileId ?? file.file_id ?? file.id);
   const modKey = mod => `${modDomain(mod)}:${modId(mod)}`;
-  function libraryMods(){if(state.settings.yourGamesOnly===false)return state.mods;const domains=new Set(state.games.map(gameDomain));return state.mods.filter(mod=>domains.has(modDomain(mod)));}
-  const gameName = domain => state.games.find(g=>gameDomain(g)===domain)?.name || domain || 'Nexus Mods';
+  function libraryMods(){return scopedLibrary;}
+  const gameName = domain => gameNames.get(domain) || domain || 'Nexus Mods';
   const picture = mod => mod.pictureUrl ?? mod.picture_url ?? mod.imageUrl ?? '';
   const imageUrl = value => {try {const url=new URL(String(value));return url.protocol==='https:'||url.protocol==='http:'?url.href:'';}catch{return '';}};
   const updated = mod => mod.updatedAt ?? mod.updated_timestamp ?? mod.updated_time;
   const downloaded = mod => mod.lastDownloadedAt ?? mod.downloadedAt ?? mod.last_downloaded;
   function timestamp(value){if(value==null||value==='')return 0;const n=Number(value);if(Number.isFinite(n)&&n>0)return n<1e12?n*1000:n;const t=Date.parse(value);return Number.isFinite(t)?t:0;}
   function needsReview(mod){return mod.needsReview!=null?Boolean(mod.needsReview):timestamp(updated(mod))>timestamp(downloaded(mod));}
-  function date(value,withTime=false){const t=timestamp(value);if(!t)return 'Not recorded';return new Intl.DateTimeFormat(undefined,{day:'numeric',month:'short',year:'numeric',...(withTime?{hour:'2-digit',minute:'2-digit'}:{})}).format(t);}
-  function dateCell(value){const t=timestamp(value);if(!t)return '<span class="muted">Not recorded</span>';const d=new Date(t);return `${esc(new Intl.DateTimeFormat(undefined,{day:'numeric',month:'short',year:'numeric'}).format(d))}<span>${esc(new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit'}).format(d))}</span>`;}
+  function date(value,withTime=false){const t=timestamp(value);if(!t)return 'Not recorded';return (withTime?dateTimeFormatter:dateFormatter).format(t);}
+  function dateCell(value){const t=timestamp(value);if(!t)return '<span class="muted">Not recorded</span>';if(dateCells.has(t))return dateCells.get(t);const html=`${esc(dateFormatter.format(t))}<span>${esc(timeFormatter.format(t))}</span>`;if(dateCells.size>=8192)dateCells.clear();dateCells.set(t,html);return html;}
   function bytes(n){n=Number(n);if(!Number.isFinite(n)||n<=0)return '—';if(n<1024)return `${n} B`;const units=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++;}while(n>=1024&&i<units.length-1);return `${n.toFixed(n<10?1:0)} ${units[i]}`;}
   function shortName(name){return String(name||'M').split(/[\s_-]+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();}
   function modUrl(mod){return imageUrl(mod.url)||`https://www.nexusmods.com/${encodeURIComponent(modDomain(mod))}/mods/${modId(mod)}`;}
@@ -130,14 +152,15 @@
     const downloads=$('#download-count'),total=state.downloads.length;
     downloads.textContent=total;downloads.title=`${total} ${total===1?'download':'downloads'}, ${active} active`;
     const name=state.user?.name || state.user?.username;
-    $('#account').innerHTML=`<span class="avatar">${esc(name?shortName(name):'N')}</span><div><strong>${esc(name || 'Not connected')}</strong><small>${name?(state.user.isPremium?'Premium account':'Free account'):'Connect your Nexus account'}</small></div><button class="icon-button" data-page="settings" aria-label="Account settings">${icon('settings')}</button>`;
+    setHtml('#account',`<span class="avatar">${esc(name?shortName(name):'N')}</span><div><strong>${esc(name || 'Not connected')}</strong><small>${name?(state.user.isPremium?'Premium account':'Free account'):'Connect your Nexus account'}</small></div><button class="icon-button" data-page="settings" aria-label="Account settings">${icon('settings')}</button>`);
   }
   function renderGames(){
     const total=libraryMods().length;
-    $('#game-strip').innerHTML=`<button class="game-card all-games ${activeGame?'':'selected'}" data-select-game="" aria-pressed="${!activeGame}">${icon('library')}<strong>All games</strong><small>${total} ${total===1?'mod':'mods'}</small></button>`+
-      state.games.map(g=>{const domain=gameDomain(g),img=imageUrl(g.imageUrl??g.image_url??g.tile_image??g.image),count=state.mods.filter(m=>modDomain(m)===domain).length;return `<div class="game-card ${activeGame===domain?'selected':''}"><button class="game-select" data-select-game="${esc(domain)}" aria-label="Show ${esc(g.name)} mods" aria-pressed="${activeGame===domain}" title="${esc(g.name)} · ${count} mods">${img?`<img src="${esc(img)}" alt="" loading="lazy"><span class="game-label">${esc(g.name)}</span>`:`<span class="game-fallback">${icon('game')}<span>${esc(g.name)}</span></span>`}</button><button class="game-remove" data-remove-game="${esc(domain)}" aria-label="Remove ${esc(g.name)} from your games" title="Remove from your games">×</button></div>`;}).join('')+
-      `<button class="game-card add-game-card" id="game-strip-add">${icon('plus')}<span>Add a game</span></button>`;
+    setHtml('#game-strip',`<button class="game-card all-games ${activeGame?'':'selected'}" data-select-game="" aria-pressed="${!activeGame}">${icon('library')}<strong>All games</strong><small>${total} ${total===1?'mod':'mods'}</small></button>`+
+      state.games.map(g=>{const domain=gameDomain(g),img=imageUrl(g.imageUrl??g.image_url??g.tile_image??g.image),count=gameModCounts.get(domain)||0;return `<div class="game-card ${activeGame===domain?'selected':''}"><button class="game-select" data-select-game="${esc(domain)}" aria-label="Show ${esc(g.name)} mods" aria-pressed="${activeGame===domain}" title="${esc(g.name)} · ${count} mods">${img?`<img src="${esc(img)}" alt="" loading="lazy"><span class="game-label">${esc(g.name)}</span>`:`<span class="game-fallback">${icon('game')}<span>${esc(g.name)}</span></span>`}</button><button class="game-remove" data-remove-game="${esc(domain)}" aria-label="Remove ${esc(g.name)} from your games" title="Remove from your games">×</button></div>`;}).join('')+
+      `<button class="game-card add-game-card" id="game-strip-add">${icon('plus')}<span>Add a game</span></button>`);
   }
+  function renderCheckDate(){$('#last-checked').textContent=state.lastCheckedAt?`Checked ${date(state.lastCheckedAt,true)}`:'Not checked yet';}
   function renderMods(){
     const library=libraryMods();
     const scoped=library.filter(m=>!activeGame||modDomain(m)===activeGame);
@@ -147,7 +170,7 @@
     mods.sort((a,b)=>sort==='name'?String(a.name).localeCompare(String(b.name)):sort==='downloaded'?timestamp(downloaded(b))-timestamp(downloaded(a)):timestamp(updated(b))-timestamp(updated(a)));
     $('#mods-title').textContent=activeGame?gameName(activeGame):'All mods';
     $('#all-count').textContent=scoped.length;$('#updates-count').textContent=scoped.filter(needsReview).length;
-    $('#last-checked').textContent=state.lastCheckedAt?`Checked ${date(state.lastCheckedAt,true)}`:'Not checked yet';
+    renderCheckDate();
     const empty=library.length===0;
     $('.table-toolbar').classList.toggle('hidden',state.mods.length===0);
     $('#your-games-only').setAttribute('aria-pressed',String(state.settings.yourGamesOnly!==false));
@@ -155,7 +178,7 @@
     $('#library-empty p').innerHTML=state.mods.length?'Add a game above or turn off <strong>Your games only</strong> to view all imported mods.':'Import your Nexus download history or add a mod link.';
     $('#library-empty').classList.toggle('hidden',!empty);$('#mods-table-wrap').classList.toggle('hidden',empty);$('#table-footer').classList.toggle('hidden',empty);
     $('#visible-count').textContent=`${mods.length} of ${scoped.length} ${scoped.length===1?'mod':'mods'}`;
-    $('#mods-body').innerHTML=mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small></span></div></td><td><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date">${dateCell(downloaded(m))}</td><td class="table-date">${dateCell(updated(m))}</td><td><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="6" class="no-results">No mods match this view. Try another game or search.</td></tr>';
+    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small></span></div></td><td><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date">${dateCell(downloaded(m))}</td><td class="table-date">${dateCell(updated(m))}</td><td><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="6" class="no-results">No mods match this view. Try another game or search.</td></tr>');
   }
   function renderDownloads(){
     const downloads=[...state.downloads];

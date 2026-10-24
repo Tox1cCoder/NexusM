@@ -107,12 +107,39 @@
       };
       window.NexusM.setState(fixture);
       window.NexusM.navigate('library');
+      await check('large-library rendering benchmark preserves the full list and search',()=>{
+        const mods=Array.from({length:2500},(_,index)=>({gameDomain:`game${index%9+1}`,modId:index+1,name:`Benchmark mod ${index+1}`,author:'Fixture author',version:'1.0',updatedAt:1792500000-index*60,lastDownloadedAt:1792100000-index*60,needsReview:index%3===0}));
+        const large={...fixture,mods},metrics={mods:mods.length};
+        const measure=(name,action)=>{const start=performance.now();action();document.body.offsetHeight;metrics[name]=Math.round((performance.now()-start)*10)/10;};
+        try{
+          measure('initialRenderMs',()=>window.NexusM.setState(large));
+          expect($$('#mods-body tr[data-mod-key]').length===2500,'The complete large library must remain visible.');
+          measure('unchangedRefreshMs',()=>window.NexusM.setState({...large,mods:mods.map(mod=>({...mod}))}));
+          measure('downloadOnlyUpdateMs',()=>window.NexusM.setState({downloads:[{id:'benchmark-transfer',name:'Fixture download',status:'downloading',bytes:512,total:1024}]}));
+          measure('searchMs',()=>{$('#mod-search').value='Benchmark mod 2499';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));});
+          expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='game6:2499','Large-library search returned the wrong row.');
+          report.checks.push({test:'Large-library timings',passed:true,metrics});
+        }finally{$('#mod-search').value='';window.NexusM.setState(fixture);}
+      });
       await check('nine games and all-game library render',()=>{
         expect($$('[data-select-game]').length===10,'Expected nine games plus All games.');
         expect($$('#mods-body tr[data-mod-key]').length===3,'Expected all three fixture mods.');
         expect($('#library-count').textContent==='3','Removed-game records should stay out of active-library counts.');
         expect(!$('#mods-body').innerText.includes('Preserved old-game history'),'Removed-game history should stay hidden while Your games only is enabled.');
         expect($('#your-games-only').getAttribute('aria-pressed')==='true','Your games only should default to enabled.');
+      });
+      await check('unrelated state updates preserve library rows, focus, and game controls',()=>{
+        const row=$('#mods-body tr'),game=$('[data-select-game="game1"]'),account=$('#account button');
+        row.focus();
+        window.NexusM.setState({...fixture,mods:fixture.mods.map(mod=>({...mod,summary:'Updated background metadata',lastCheckedAt:1792600000})),lastCheckedAt:1792600000});
+        expect($('#mods-body tr')===row&&document.activeElement===row,'An identical visible library must retain its focused row.');
+        expect($('[data-select-game="game1"]')===game&&$('#account button')===account,'Unchanged game and account controls must retain their DOM nodes.');
+        window.NexusM.setState({downloads:[{id:'render-fixture',name:'Progress archive',status:'downloading',bytes:100,total:200}]});
+        expect($('#mods-body tr')===row&&document.activeElement===row,'A download-only state update must not rebuild the library.');
+        expect($('#last-checked').textContent.startsWith('Checked '),'The latest check date should still update without replacing rows.');
+        window.NexusM.setState({mods:fixture.mods.map(mod=>mod.modId===1?{...mod,version:'9.9'}:mod)});
+        expect($('[data-mod-key="game1:1"] .version-chip').textContent==='9.9','A changed visible mod field must still repaint the library.');
+        window.NexusM.setState(fixture);
       });
       await check('updated sort and name sort',()=>{
         expect($('#mods-body tr').dataset.modKey==='game2:3','Newest update should sort first.');
