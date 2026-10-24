@@ -10,6 +10,7 @@
   let state = {games:[],mods:[],downloads:[],settings:{yourGamesOnly:true},user:null};
   let activeGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
   let selectedFiles = new Set();
+  let filePreviews = new Map();
   let lastFocus = null, lastNotice = null;
   let loadingLibrary = false, refreshPromise = null;
   let downloadFolderDraft = null;
@@ -210,14 +211,14 @@
 
   async function showMod(key){
     const mod=state.mods.find(m=>modKey(m)===key);if(!mod)return;
-    lastFocus=document.activeElement;detail={mod,files:[],changelogs:{},requirements:[]};detailTab='files';selectedFiles.clear();
+    lastFocus=document.activeElement;detail={mod,files:[],changelogs:{},requirements:[]};detailTab='files';selectedFiles.clear();filePreviews.clear();
     $('#detail-panel').classList.remove('hidden');$('#detail-scrim').classList.remove('hidden');document.body.style.overflow='hidden';$('#detail-close').focus();
     $('#detail-breadcrumb').textContent=gameName(modDomain(mod)).toUpperCase();$('#detail-content').innerHTML='<div class="loading"><span class="spinner"></span>Getting the latest mod details…</div>';
     const token=++detailToken;
     try{const result=await rpc('getModDetails',{gameDomain:modDomain(mod),modId:modId(mod)});if(token!==detailToken)return;detail={...detail,...result,mod:{...mod,...result?.mod},files:result?.files??[]};renderDetail();}
     catch(error){if(token===detailToken)$('#detail-content').innerHTML=`<div class="detail-tab-content"><h3>Couldn’t load this mod</h3><p class="subtle-empty">${esc(error.message)}</p><button class="button" data-detail-retry="${esc(key)}">Try again</button></div>`;}
   }
-  function closeDetail(){detailToken++;$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;if(lastFocus?.isConnected)lastFocus.focus();}
+  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;if(lastFocus?.isConnected)lastFocus.focus();}
   function renderDetail(){
     if(!detail)return;const mod=detail.mod,img=imageUrl(picture(mod));
     $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body"></div>`;
@@ -246,6 +247,41 @@
       when.textContent=at?`Last downloaded ${date(at,true)}`:'';when.classList.toggle('hidden',!at);
     }
   }
+  function previewTree(entries){
+    const root=new Map();
+    for(const entry of entries){
+      const parts=String(entry.path||'').replace(/\\/g,'/').split('/').filter(Boolean);if(!parts.length)continue;
+      if(parts.length>64)parts.splice(63,parts.length-63,parts.slice(63).join('/'));
+      let siblings=root;
+      parts.forEach((name,index)=>{if(!siblings.has(name))siblings.set(name,{name,children:new Map()});const node=siblings.get(name);if(index===parts.length-1)node.entry=entry;siblings=node.children;});
+    }
+    const render=(nodes,depth=0)=>`<ul>${[...nodes.values()].sort((a,b)=>Number(!!b.children.size||!!b.entry?.isDirectory)-Number(!!a.children.size||!!a.entry?.isDirectory)||a.name.localeCompare(b.name,undefined,{numeric:true,sensitivity:'base'})).map(node=>{
+      const folder=node.children.size>0||node.entry?.isDirectory;
+      return folder?`<li><details class="preview-folder" ${depth===0?'open':''}><summary>${icon('folder')}<span>${esc(node.name)}</span></summary>${node.children.size?render(node.children,depth+1):'<p class="preview-empty-folder">Empty folder</p>'}</details></li>`:`<li class="preview-file"><span class="preview-file-name">${esc(node.name)}</span><small>${esc(node.entry?.sizeLabel||bytes(node.entry?.size))}</small></li>`;
+    }).join('')}</ul>`;
+    return render(root);
+  }
+  function renderFilePreview(id){
+    const card=$(`[data-file-card="${id}"]`,$('#detail-panel'));if(!card)return;
+    const preview=filePreviews.get(id),button=$('[data-preview-file]',card),panel=$('.file-preview',card);
+    button.setAttribute('aria-expanded',String(preview?.open===true));panel.classList.toggle('hidden',preview?.open!==true);
+    if(!preview)return;
+    panel.setAttribute('aria-busy',String(preview.loading===true));
+    if(preview.loading){panel.innerHTML='<p class="preview-message" role="status">Loading file contents...</p>';return;}
+    if(preview.error){panel.innerHTML=`<p class="preview-message" role="alert">${esc(preview.error)}</p><button class="button small" data-retry-preview="${id}">Retry preview</button>`;return;}
+    const result=preview.result||{},entries=Array.isArray(result.entries)?result.entries:[];
+    panel.innerHTML=`<h4>File contents</h4>${result.notice?`<p class="preview-message">${esc(result.notice)}</p>`:''}${entries.length?`<div class="file-preview-tree">${previewTree(entries)}</div>`:`<p class="preview-message">${result.available===false?'Nexus has no file contents preview for this archive.':'No files are listed in this archive.'}</p>`}${result.truncated?'<p class="preview-message">This preview shows only part of the archive listing.</p>':''}`;
+  }
+  async function previewFile(id,retry=false){
+    id=Number(id);if(!detail||!detail.files.some(file=>fileId(file)===id))return;
+    const previous=filePreviews.get(id);
+    if(previous&&!retry){previous.open=!previous.open;renderFilePreview(id);return;}
+    const preview={open:true,loading:true};filePreviews.set(id,preview);renderFilePreview(id);
+    const token=detailToken,mod=detail.mod;
+    try{const result=await rpc('getFileContents',{gameDomain:modDomain(mod),modId:modId(mod),fileId:id});if(token!==detailToken||filePreviews.get(id)!==preview)return;preview.result=result;}
+    catch(error){if(token!==detailToken||filePreviews.get(id)!==preview)return;preview.error=error.message;}
+    finally{if(token===detailToken&&filePreviews.get(id)===preview){preview.loading=false;renderFilePreview(id);}}
+  }
   const versionCollator=new Intl.Collator(undefined,{numeric:true,sensitivity:'base'});
   function compareChangelogVersions(a,b){
     const parse=value=>String(value).trim().replace(/^v(?=\d)/i,'').split('+')[0].match(/^(\d+(?:\.\d+)*)(.*)$/);
@@ -268,7 +304,8 @@
       const order=['Main files','Updates','Optional files','Miscellaneous','Other files','Old versions'];
       const sorted=[...groups].sort((a,b)=>(order.indexOf(a[0])<0?99:order.indexOf(a[0]))-(order.indexOf(b[0])<0?99:order.indexOf(b[0])));
       el.innerHTML=`<div class="details-note">${icon('info')}<span>Choose the exact files you need. Check the changelog, requirements, and each file’s instructions before installing. Get this file handles Nexus’s free-download steps automatically. Sign in or complete a browser check if prompted.</span></div><p class="file-history-note">Flags track exact files, not installed mods. Older downloads without file-level history show “No download recorded.”</p><div class="files-toolbar"><p><span id="selected-files-count">${selectedFiles.size}</span> files selected</p><button class="button primary small" id="download-selected" ${selectedFiles.size?'':'disabled'}>${icon('download')}Download selected</button></div>`+
-        sorted.map(([group,files])=>`<section class="file-group"><h3>${esc(group)}<span>${files.length}</span></h3>${files.map(f=>{const id=fileId(f),selected=selectedFiles.has(id),at=fileDownloadedAt(f);return `<article class="file-card ${selected?'selected':''}" data-file-card="${id}" data-downloaded-at="${at}"><label class="file-card-head"><input type="checkbox" data-select-file="${id}" ${selected?'checked':''} aria-label="Select ${esc(f.name)}"><span class="file-card-title"><span class="file-title-row"><strong>${esc(f.name)}</strong><span class="file-download-flag ${at?'downloaded':''}" title="${at?'This exact file has a recorded download. Installation is manual.':'No download date is available for this exact file.'}">${fileDownloadFlag(at)}</span></span><span class="file-card-meta"><span class="version-chip">${esc(f.version||'—')}</span><span>${esc(date(f.uploadedAt??f.uploaded_timestamp??f.uploaded_time,true))}</span><span>${bytes(f.size??f.size_in_bytes??Number(f.size_kb||0)*1024)}</span><span class="file-downloaded-date ${at?'':'hidden'}">${at?`Last downloaded ${esc(date(at,true))}`:''}</span></span></span></label><div class="file-card-body"><div class="rich-text">${richText(f.description)||'<span>No file description provided.</span>'}</div><div class="file-card-actions"><small>Review this file before installing</small><button class="button small file-download" data-download-file="${id}">${icon('download')}Get this file</button></div></div></article>`;}).join('')}</section>`).join('')+(!detail.files.length?'<p class="subtle-empty">No downloadable files are currently available for this mod.</p>':'');
+        sorted.map(([group,files])=>`<section class="file-group"><h3>${esc(group)}<span>${files.length}</span></h3>${files.map(f=>{const id=fileId(f),selected=selectedFiles.has(id),at=fileDownloadedAt(f);return `<article class="file-card ${selected?'selected':''}" data-file-card="${id}" data-downloaded-at="${at}"><label class="file-card-head"><input type="checkbox" data-select-file="${id}" ${selected?'checked':''} aria-label="Select ${esc(f.name)}"><span class="file-card-title"><span class="file-title-row"><strong>${esc(f.name)}</strong><span class="file-download-flag ${at?'downloaded':''}" title="${at?'This exact file has a recorded download. Installation is manual.':'No download date is available for this exact file.'}">${fileDownloadFlag(at)}</span></span><span class="file-card-meta"><span class="version-chip">${esc(f.version||'—')}</span><span>${esc(date(f.uploadedAt??f.uploaded_timestamp??f.uploaded_time,true))}</span><span>${bytes(f.size??f.size_in_bytes??Number(f.size_kb||0)*1024)}</span><span class="file-downloaded-date ${at?'':'hidden'}">${at?`Last downloaded ${esc(date(at,true))}`:''}</span></span></span></label><div class="file-card-body"><div class="rich-text">${richText(f.description)||'<span>No file description provided.</span>'}</div><div class="file-card-actions"><button class="text-button" data-preview-file="${id}" aria-expanded="false" aria-controls="file-preview-${id}">Preview file contents</button><button class="button small file-download" data-download-file="${id}">${icon('download')}Get this file</button></div><section class="file-preview hidden" id="file-preview-${id}" aria-label="File contents of ${esc(f.name)}"></section></div></article>`;}).join('')}</section>`).join('')+(!detail.files.length?'<p class="subtle-empty">No downloadable files are currently available for this mod.</p>':'');
+      for(const id of filePreviews.keys())renderFilePreview(id);
     }
     if(detailTab==='changelog'){
       const entries=Array.isArray(detail.changelogs)?detail.changelogs.map(c=>[c.version??c.name??'Update',c.changes??c.changelog??c.description??c.text]):Object.entries(detail.changelogs||{});
@@ -307,6 +344,8 @@
     if(target.dataset.detailRetry){showMod(target.dataset.detailRetry);return;}
     if(target.hasAttribute('data-open-mod')){if(detail)openUrl(modUrl(detail.mod));return;}
     if(target.dataset.openUrl){openUrl(target.dataset.openUrl);return;}
+    if(target.dataset.previewFile){previewFile(target.dataset.previewFile);return;}
+    if(target.dataset.retryPreview){previewFile(target.dataset.retryPreview,true);return;}
     if(target.dataset.downloadFile){downloadFile(target.dataset.downloadFile,target);return;}
     if(target.dataset.cancelDownload){run('cancelDownload',{id:target.dataset.cancelDownload},target);return;}
     if(target.dataset.retryDownload){run('retryDownload',{id:target.dataset.retryDownload},target);return;}
@@ -342,7 +381,7 @@
     if(input.dataset.selectFile){const id=Number(input.dataset.selectFile);input.checked?selectedFiles.add(id):selectedFiles.delete(id);input.closest('.file-card').classList.toggle('selected',input.checked);$('#selected-files-count').textContent=selectedFiles.size;renderDownloadControls();}
     if(input.id==='dialog-file'&&input.files?.[0]){try{const file=input.files[0];if(file.size>30*1024*1024)throw new Error('Choose a history or backup file smaller than 30 MB.');$('#dialog-value').value=await file.text();}catch(error){toast(error.message,true);}}
   });
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('#input-dialog').open)closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('#input-dialog').open){const focusable=$$('button:not([disabled]),input,a[href],select,textarea', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('#input-dialog').open)closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('#input-dialog').open){const focusable=$$('button:not([disabled]),input,a[href],select,textarea,summary', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
   $('#mod-search').addEventListener('input',renderMods);$('#mod-sort').addEventListener('change',renderMods);$('#input-form').addEventListener('submit',submitDialog);$('#detail-scrim').addEventListener('click',closeDetail);
   $('#download-folder').addEventListener('input',e=>{downloadFolderDraft=e.target.value;});
   document.addEventListener('error',e=>{if(e.target.tagName==='IMG'){e.target.style.display='none';if(e.target.closest('.game-card'))e.target.parentElement.insertAdjacentHTML('afterbegin',`<span class="game-fallback">${icon('game')}<span>${esc(e.target.parentElement.title?.split(' · ')[0]||'Game')}</span></span>`);}},true);

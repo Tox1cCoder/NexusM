@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -60,6 +61,134 @@ namespace NexusM
         {
             CheckId(fileId);
             return GetAsync(ModPath(domain, modId) + "/files/" + fileId.ToString(CultureInfo.InvariantCulture) + ".json", token);
+        }
+
+        // The preview is a small public archive manifest, not an archive download.
+        // Its request deliberately carries no API key, including on failure/redirects.
+        public async Task<object> FileContentsAsync(string domain, long modId, long fileId, CancellationToken token = default(CancellationToken))
+        {
+            var file = JsonTools.Dict(await FileAsync(domain, modId, fileId, token).ConfigureAwait(false));
+            if (JsonTools.Long(file, "file_id") != fileId)
+                throw new NexusApiException("Nexus returned information for a different file. Please reopen the mod and try again.", 502);
+            string link = JsonTools.Text(file, "content_preview_link");
+            if (String.IsNullOrWhiteSpace(link)) return FilePreviewResult(false, new List<object>(), false, "Nexus has no content preview for this file.");
+            Uri uri;
+            if (!Uri.TryCreate(link, UriKind.Absolute, out uri) || uri.Scheme != "https" || uri.Host != "file-metadata.nexusmods.com" ||
+                uri.Port != 443 || !String.IsNullOrEmpty(uri.UserInfo) || !String.IsNullOrEmpty(uri.Fragment) ||
+                !uri.AbsolutePath.StartsWith("/file/nexus-files-s3-meta/", StringComparison.Ordinal))
+                throw new NexusApiException("Nexus provided an unsupported content preview address. Use Open on Nexus to view this file.", 502);
+            return await FetchFilePreviewAsync(uri, token).ConfigureAwait(false);
+        }
+
+        private async Task<object> FetchFilePreviewAsync(Uri uri, CancellationToken token, int timeoutMilliseconds = 45000)
+        {
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(token))
+            {
+                // ResponseHeadersRead leaves the body outside HttpClient.Timeout.
+                // Bound the entire metadata read so a stalled stream releases its slot.
+                timeout.CancelAfter(timeoutMilliseconds);
+                try { return await FetchFilePreviewCoreAsync(uri, timeout.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException)
+                {
+                    token.ThrowIfCancellationRequested();
+                    throw new NexusApiException("Nexus's file preview did not respond in time. Please try again.", 408);
+                }
+            }
+        }
+
+        private async Task<object> FetchFilePreviewCoreAsync(Uri uri, CancellationToken token)
+        {
+            await concurrency.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                using (var request = new HttpRequestMessage(HttpMethod.Get, uri))
+                {
+                    request.Headers.TryAddWithoutValidation("Accept", "application/json");
+                    request.Headers.TryAddWithoutValidation("User-Agent", "NexusM/" + AppVersion + " (archive content preview)");
+                    HttpResponseMessage response;
+                    try { response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false); }
+                    catch (TaskCanceledException) { token.ThrowIfCancellationRequested(); throw new NexusApiException("Nexus's file preview did not respond in time. Please try again.", 408); }
+                    catch (HttpRequestException) { throw new NexusApiException("Could not reach Nexus's file preview. Check your connection and try again.", 0); }
+                    using (response)
+                    {
+                        if (response.StatusCode == HttpStatusCode.NotFound)
+                            return FilePreviewResult(false, new List<object>(), false, "Nexus has no content preview for this file yet.");
+                        if (!response.IsSuccessStatusCode)
+                            throw new NexusApiException("Nexus could not load this file preview. Please try again or use Open on Nexus.", (int)response.StatusCode);
+                        const int maxBytes = 4 * 1024 * 1024;
+                        if (response.Content.Headers.ContentLength > maxBytes)
+                            throw new NexusApiException("This file preview is too large to display. Use Open on Nexus to view it.", 413);
+                        string text;
+                        try
+                        {
+                            using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                            using (var buffer = new MemoryStream())
+                            {
+                                var bytes = new byte[8192]; int count;
+                                while ((count = await stream.ReadAsync(bytes, 0, bytes.Length, token).ConfigureAwait(false)) > 0)
+                                {
+                                    if (buffer.Length + count > maxBytes)
+                                        throw new NexusApiException("This file preview is too large to display. Use Open on Nexus to view it.", 413);
+                                    buffer.Write(bytes, 0, count);
+                                }
+                                text = Encoding.UTF8.GetString(buffer.ToArray());
+                            }
+                        }
+                        catch (IOException) { throw new NexusApiException("Nexus's file preview could not be read. Please try again.", 502); }
+                        object raw;
+                        try { raw = JsonTools.Serializer().DeserializeObject(text); }
+                        catch (ArgumentException) { throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502); }
+                        catch (InvalidOperationException) { throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502); }
+                        catch (MissingMethodException) { throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502); }
+                        var root = JsonTools.Dict(raw);
+                        var children = JsonTools.Get(root, "children");
+                        if (!(children is object[]) && !(children is System.Collections.IList))
+                            throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502);
+                        var entries = new List<object>(); bool truncated = false;
+                        CollectPreviewEntries(JsonTools.Array(children), "", 0, entries, ref truncated, token);
+                        return FilePreviewResult(true, entries, truncated, truncated ? "Some archive entries were omitted because the preview is too large." : "");
+                    }
+                }
+            }
+            finally { concurrency.Release(); }
+        }
+
+        private static object FilePreviewResult(bool available, List<object> entries, bool truncated, string notice)
+        {
+            return new Dictionary<string, object> { { "available", available }, { "entries", entries }, { "truncated", truncated }, { "notice", notice } };
+        }
+
+        private static void CollectPreviewEntries(object[] nodes, string parent, int depth, List<object> entries, ref bool truncated, CancellationToken token)
+        {
+            if (depth > 64) { truncated = true; return; }
+            foreach (var value in nodes)
+            {
+                token.ThrowIfCancellationRequested();
+                if (entries.Count >= 10000) { truncated = true; return; }
+                var node = JsonTools.Dict(value);
+                string path = JsonTools.Text(node, "path").Replace('\\', '/');
+                if (path.Length == 0) path = (parent.Length == 0 ? "" : parent + "/") + JsonTools.Text(node, "name");
+                bool directory = JsonTools.Text(node, "type") == "directory";
+                var children = JsonTools.Get(node, "children");
+                if (path.Length > 4096) { truncated = true; continue; }
+                if (path.Length > 0 && (directory || JsonTools.Text(node, "type") == "file"))
+                {
+                    string sizeLabel = JsonTools.Text(node, "size");
+                    entries.Add(new Dictionary<string, object> { { "path", path }, { "isDirectory", directory }, { "size", PreviewSize(sizeLabel) }, { "sizeLabel", sizeLabel } });
+                }
+                if (children != null) CollectPreviewEntries(JsonTools.Array(children), path, depth + 1, entries, ref truncated, token);
+            }
+        }
+
+        private static long PreviewSize(string value)
+        {
+            var parts = System.Text.RegularExpressions.Regex.Match(value ?? "", @"^\s*(\d+(?:\.\d+)?)\s*([kKmMgGtT]?[bB])?\s*$");
+            double size;
+            if (!parts.Success || !Double.TryParse(parts.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out size)) return 0;
+            string unit = parts.Groups[2].Value.ToLowerInvariant();
+            int exponent = unit == "kb" ? 1 : unit == "mb" ? 2 : unit == "gb" ? 3 : unit == "tb" ? 4 : 0;
+            size *= Math.Pow(1000, exponent);
+            return size > 0 && size <= Int64.MaxValue ? (long)size : 0;
         }
 
         // List refreshes need only these small fields. Fetching them together also includes

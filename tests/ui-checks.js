@@ -11,12 +11,18 @@
   let folderSaveRequest = null;
   let browseFolderResult = {cancelled:true};
   const requests = [];
+  const previewRequests = new Map();
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
   const check = async (name, test) => {
     try {await test();report.checks.push({test:name,passed:true});}
     catch(error){report.checks.push({test:name,passed:false,error:error.message});}
   };
   const expect = (condition,message) => {if(!condition)throw new Error(message);};
+  const replyPreview = (request,result,error=null) => {
+    expect(request&&previewRequests.has(String(request.id)),'No matching preview request is waiting.');
+    previewRequests.delete(String(request.id));
+    window.NexusM.receive(error?{id:request.id,ok:false,error}:{id:request.id,ok:true,result});
+  };
   const fixture = {
     games:Array.from({length:9},(_,i)=>({id:i+1,domain:`game${i+1}`,name:`Test Game ${i+1}`})),
     mods:[
@@ -68,6 +74,7 @@
       });
       bridge.postMessage=function(message){
         if(message.action==='getModDetails'){requests.push(message);queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:fakeDetails}));}
+        else if(message.action==='getFileContents'){requests.push(message);previewRequests.set(String(message.id),message);}
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
@@ -181,6 +188,73 @@
         window.NexusM.setState({fileDownloads:{...fixture.fileDownloads,'game1:1:11':{...record,status:'completed'}},downloads:[]});
         expect($('[data-file-card="11"] .file-download-flag.downloaded'),'Clearing the visible list must keep the persisted file flag.');
         window.NexusM.setState({fileDownloads:fixture.fileDownloads,downloads:fixture.downloads});
+      });
+      await check('file previews show exact archive paths safely without downloading or losing selections',async()=>{
+        const buttons=$$('[data-preview-file]'),input=$('[data-select-file="12"]');
+        expect(buttons.length===3&&buttons.every(button=>button.textContent==='Preview file contents'),'Every main and optional file needs its own preview button.');
+        const before=requests.filter(r=>r.action==='getFileContents').length,downloads=requests.filter(r=>r.action==='startDownload').length;
+        expect(before===0,'Archive previews must remain lazy until requested.');
+        const button=$('[data-preview-file="10"]');button.click();
+        const request=requests.filter(r=>r.action==='getFileContents').at(-1);
+        expect(request?.payload.gameDomain==='game1'&&request.payload.modId===1&&request.payload.fileId===10,'Preview must request the exact selected main file.');
+        expect(button.getAttribute('aria-controls')==='file-preview-10'&&button.getAttribute('aria-expanded')==='true','The expanded preview needs an accessible control relationship.');
+        expect($('#file-preview-10 [role="status"]')?.textContent.includes('Loading'),'A pending preview needs an inline loading status.');
+        button.click();button.click();
+        expect(requests.filter(r=>r.action==='getFileContents').length===before+1,'Repeated toggles while loading must share the same request.');
+        const unsafeName='<img src=x onerror="window.__previewInjected=true">.pak';
+        replyPreview(request,{available:true,entries:[
+          {path:'Mods/Data/main.pak',size:128,isDirectory:false},
+          {path:'Mods/'+unsafeName,size:64,isDirectory:false},
+          {path:'README.txt',size:32,isDirectory:false},
+          {path:'Empty',size:0,isDirectory:true}
+        ],notice:'',truncated:false});await settle();
+        const panel=$('#file-preview-10');
+        expect(!panel.classList.contains('hidden')&&panel.textContent.includes('main.pak')&&panel.textContent.includes('README.txt'),'The expanded preview must show archive file names.');
+        expect([...panel.querySelectorAll('.preview-folder summary')].some(folder=>folder.textContent==='Mods')&&[...panel.querySelectorAll('.preview-folder summary')].some(folder=>folder.textContent==='Data'),'Archive paths should render as navigable folders.');
+        expect([...panel.querySelectorAll('.preview-file-name')].some(file=>file.textContent===unsafeName),'HTML-looking file names should remain literal text.');
+        expect(!panel.querySelector('img,script,[onerror]')&&!window.__previewInjected,'Archive names must never become executable markup.');
+        expect(panel.textContent.includes('128 B')&&panel.textContent.includes('Empty folder'),'File sizes and empty directories should be represented.');
+        expect($('[data-select-file="12"]')===input&&input.checked&&$('[data-select-file="10"]').checked&&$('#selected-files-count').textContent==='2','Opening a preview must preserve file selections.');
+        expect(requests.filter(r=>r.action==='startDownload').length===downloads,'Previewing file contents must not start an archive download.');
+        button.click();expect(panel.classList.contains('hidden')&&button.getAttribute('aria-expanded')==='false','The preview should collapse on another click.');
+        button.click();expect(!panel.classList.contains('hidden'),'A cached preview should reopen immediately.');
+        $('[data-detail-tab="overview"]').click();$('[data-detail-tab="files"]').click();
+        expect(!$('#file-preview-10').classList.contains('hidden')&&$('#file-preview-10').textContent.includes('main.pak'),'Returning to Files should preserve the open preview.');
+        expect(requests.filter(r=>r.action==='getFileContents').length===before+1,'Reopening and switching tabs must reuse the preview already fetched.');
+      });
+      await check('optional file previews handle unavailable archive metadata independently',async()=>{
+        $('[data-preview-file="12"]').click();
+        const request=requests.filter(r=>r.action==='getFileContents').at(-1);
+        expect(request?.payload.gameDomain==='game1'&&request.payload.modId===1&&request.payload.fileId===12,'The optional file must request its own archive rather than a main file.');
+        replyPreview(request,{available:false,entries:[],notice:'Nexus has not indexed this archive yet.',truncated:false});await settle();
+        expect($('#file-preview-12').textContent.includes('Nexus has not indexed this archive yet.'),'An unavailable preview should show the Nexus explanation.');
+        expect(!$('#file-preview-12').querySelector('.preview-file'),'Unavailable metadata must not reuse another file\'s contents.');
+        expect($('#file-preview-10').textContent.includes('main.pak'),'Opening an optional preview must not replace a main preview.');
+      });
+      await check('failed previews show an inline retry and empty archives have a clear result',async()=>{
+        $('[data-preview-file="11"]').click();
+        const request=requests.filter(r=>r.action==='getFileContents').at(-1);
+        replyPreview(request,null,'Preview temporarily unavailable.');await settle();
+        expect($('#file-preview-11 [role="alert"]')?.textContent.includes('Preview temporarily unavailable.'),'A failed preview needs a visible inline error.');
+        const retry=$('[data-retry-preview="11"]');expect(retry,'A failed preview needs a retry control.');
+        const before=requests.filter(r=>r.action==='getFileContents').length;retry.click();
+        const second=requests.filter(r=>r.action==='getFileContents').at(-1);
+        expect(requests.filter(r=>r.action==='getFileContents').length===before+1&&second.payload.fileId===11,'Retry should fetch only the failed file again.');
+        replyPreview(second,{available:true,entries:[],notice:'',truncated:false});await settle();
+        expect($('#file-preview-11').textContent.includes('No files are listed in this archive.')&&!$('#file-preview-11 [role="alert"]'),'An empty successful preview should replace the error with a clear result.');
+      });
+      await check('late preview responses cannot replace a newly opened mod detail',async()=>{
+        $('#detail-close').click();await window.NexusM.showMod('game1:1');
+        $('[data-preview-file="10"]').click();
+        const stale=requests.filter(r=>r.action==='getFileContents').at(-1);
+        $('#detail-close').click();await window.NexusM.showMod('game1:1');
+        replyPreview(stale,{available:true,entries:[{path:'STALE-PREVIEW.pak',size:1,isDirectory:false}],notice:'',truncated:false});await settle();
+        expect($('#file-preview-10').classList.contains('hidden')&&!$('#detail-panel').textContent.includes('STALE-PREVIEW.pak'),'A response for closed details must not render in a new detail session.');
+        const before=requests.filter(r=>r.action==='getFileContents').length;$('[data-preview-file="10"]').click();
+        const current=requests.filter(r=>r.action==='getFileContents').at(-1);
+        expect(requests.filter(r=>r.action==='getFileContents').length===before+1,'A new detail session must not inherit a stale preview request.');
+        replyPreview(current,{available:true,entries:[{path:'Fresh.pak',size:1,isDirectory:false}],notice:'',truncated:true});await settle();
+        expect($('#file-preview-10').textContent.includes('Fresh.pak')&&$('#file-preview-10').textContent.includes('only part of the archive listing'),'A fresh partial preview should show its files and truncation notice.');
       });
       await check('Get this file prepares a download with one click',async()=>{
         expect($('#detail-tab-body .details-note').textContent.includes('free-download steps automatically'),'File instructions should describe automatic preparation.');
@@ -421,6 +495,8 @@
       if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderSaveRequest)window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'UI fixture ended.'});
+      for(const request of previewRequests.values())window.NexusM.receive({id:request.id,ok:false,error:'UI fixture ended.'});
+      previewRequests.clear();
       window.NexusM.setState({clearingDownloadFolder:false});
       window.NexusM.receive({event:'refreshProgress',data:{running:false}});
       bridge.postMessage=originalPost;

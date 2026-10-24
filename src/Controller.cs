@@ -77,6 +77,7 @@ namespace NexusM
                 Emit(); return Store.PublicState();
             }
             if (action == "getModDetails") return await Details(Data.Str(p, "gameDomain"), Data.Num(p, "modId"));
+            if (action == "getFileContents") { RequireApi(); return await Api.FileContentsAsync(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId"), lifetime.Token); }
             if (action == "startDownload") { await AuthorizeDownload(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId")); return Store.PublicState(); }
             if (action == "cancelDownload") {
                 string id = Data.Str(p, "id");

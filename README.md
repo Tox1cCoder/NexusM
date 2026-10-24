@@ -46,6 +46,8 @@ Downloads run one at a time. Cancelling a download or closing the app keeps its 
 
 **Downloaded** flags record exact files downloaded through NexusM; they do not mean a mod is installed. Older website history may have a mod-level download date without a per-file flag.
 
+Select **Preview file contents** on any file card to browse its archive folders and filenames before downloading. The preview loads only when requested and keeps your selected files unchanged. Some archives have no preview available on Nexus.
+
 ### Links from your normal browser
 
 NexusM captures `nxm://` links inside its own Nexus window automatically. To handle links clicked in your usual browser too, choose **Settings → Handle Nexus download links → Set NexusM as handler**. This replaces your Windows account's current `nxm://` handler, including another mod manager if one is configured.
@@ -118,6 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCleanup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FilePreview.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
