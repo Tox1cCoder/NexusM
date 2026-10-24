@@ -73,9 +73,10 @@ namespace NexusM
             string link = JsonTools.Text(file, "content_preview_link");
             if (String.IsNullOrWhiteSpace(link)) return FilePreviewResult(false, new List<object>(), false, "Nexus has no content preview for this file.");
             Uri uri;
-            if (!Uri.TryCreate(link, UriKind.Absolute, out uri) || uri.Scheme != "https" || uri.Host != "file-metadata.nexusmods.com" ||
+            if (!Uri.TryCreate(link, UriKind.Absolute, out uri) || uri.Scheme != "https" ||
                 uri.Port != 443 || !String.IsNullOrEmpty(uri.UserInfo) || !String.IsNullOrEmpty(uri.Fragment) ||
-                !uri.AbsolutePath.StartsWith("/file/nexus-files-s3-meta/", StringComparison.Ordinal))
+                !((uri.Host == "file-metadata.nexusmods.com" && uri.AbsolutePath.StartsWith("/file/nexus-files-s3-meta/", StringComparison.Ordinal)) ||
+                  (uri.Host == "mod-file-manifests.nexusmods.com" && uri.AbsolutePath.Length > 1)))
                 throw new NexusApiException("Nexus provided an unsupported content preview address. Use Open on Nexus to view this file.", 502);
             return await FetchFilePreviewAsync(uri, token).ConfigureAwait(false);
         }
@@ -115,7 +116,9 @@ namespace NexusM
                             return FilePreviewResult(false, new List<object>(), false, "Nexus has no content preview for this file yet.");
                         if (!response.IsSuccessStatusCode)
                             throw new NexusApiException("Nexus could not load this file preview. Please try again or use Open on Nexus.", (int)response.StatusCode);
-                        const int maxBytes = 4 * 1024 * 1024;
+                        // Current manifests include hashes for every file, so even a
+                        // modest archive listing can exceed the legacy 4 MB limit.
+                        const int maxBytes = 16 * 1024 * 1024;
                         if (response.Content.Headers.ContentLength > maxBytes)
                             throw new NexusApiException("This file preview is too large to display. Use Open on Nexus to view it.", 413);
                         string text;
@@ -142,10 +145,15 @@ namespace NexusM
                         catch (MissingMethodException) { throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502); }
                         var root = JsonTools.Dict(raw);
                         var children = JsonTools.Get(root, "children");
-                        if (!(children is object[]) && !(children is System.Collections.IList))
-                            throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502);
                         var entries = new List<object>(); bool truncated = false;
-                        CollectPreviewEntries(JsonTools.Array(children), "", 0, entries, ref truncated, token);
+                        if (children is object[] || children is System.Collections.IList)
+                            CollectPreviewEntries(JsonTools.Array(children), "", 0, entries, ref truncated, token);
+                        else {
+                            var files = JsonTools.Get(root, "files");
+                            if (JsonTools.Long(root, "version") != 1 || (!(files is object[]) && !(files is System.Collections.IList)))
+                                throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502);
+                            CollectManifestEntries(JsonTools.Array(files), entries, ref truncated, token);
+                        }
                         return FilePreviewResult(true, entries, truncated, truncated ? "Some archive entries were omitted because the preview is too large." : "");
                     }
                 }
@@ -156,6 +164,22 @@ namespace NexusM
         private static object FilePreviewResult(bool available, List<object> entries, bool truncated, string notice)
         {
             return new Dictionary<string, object> { { "available", available }, { "entries", entries }, { "truncated", truncated }, { "notice", notice } };
+        }
+
+        private static void CollectManifestEntries(object[] files, List<object> entries, ref bool truncated, CancellationToken token)
+        {
+            foreach (var value in files)
+            {
+                token.ThrowIfCancellationRequested();
+                if (entries.Count >= 10000) { truncated = true; return; }
+                var file = JsonTools.Dict(value);
+                string path = JsonTools.Get(file, "file_path") as string;
+                long size;
+                if (String.IsNullOrWhiteSpace(path) || !Int64.TryParse(JsonTools.Text(file, "file_size"), NumberStyles.Integer, CultureInfo.InvariantCulture, out size) || size < 0)
+                    throw new NexusApiException("Nexus returned an unreadable file preview. Please try again.", 502);
+                if (path.Length > 4096) { truncated = true; continue; }
+                entries.Add(new Dictionary<string, object> { { "path", path.Replace('\\', '/') }, { "isDirectory", false }, { "size", size }, { "sizeLabel", "" } });
+            }
         }
 
         private static void CollectPreviewEntries(object[] nodes, string parent, int depth, List<object> entries, ref bool truncated, CancellationToken token)

@@ -36,7 +36,7 @@ internal sealed class FilePreviewHandler : HttpMessageHandler
         if (CancelMetadata != null) { CancelMetadata.Cancel(); await Task.Delay(100, token); }
         var response = new HttpResponseMessage(Status) { Content = ResponseStream == null ? (HttpContent)new StringContent(Json, Encoding.UTF8, "application/json") : new StreamContent(ResponseStream) };
         if (Status == HttpStatusCode.Found) response.Headers.Location = new Uri("https://untrusted.invalid/redirect");
-        if (OversizedHeader) response.Content.Headers.ContentLength = 4 * 1024 * 1024 + 1;
+        if (OversizedHeader) response.Content.Headers.ContentLength = 16 * 1024 * 1024 + 1;
         return response;
     }
 }
@@ -68,6 +68,7 @@ internal sealed class PreviewTestStream : Stream
 
 internal static class FilePreviewTests
 {
+    private const string ModernLink = "https://mod-file-manifests.nexusmods.com/7d/10/4d/7d104d12-3456-4789-9012-3456789abcde";
     private static int passed;
     private static void Check(bool condition, string name) { if (!condition) throw new Exception(name); passed++; Console.WriteLine("PASS " + name); }
     private static NexusApi Api(FilePreviewHandler handler)
@@ -98,6 +99,61 @@ internal static class FilePreviewTests
             var file = JsonTools.Dict(rows[1]);
             Check(JsonTools.Text(file, "path") == "Data/file<unsafe>.esp" && JsonTools.Long(file, "size") == 12800 && JsonTools.Text(file, "sizeLabel") == "12.8 kB", "Preview paths normalize separators while preserving text and published sizes");
         }
+        server = new FilePreviewHandler {
+            Link = ModernLink,
+            Json = "{\"version\":1,\"archive\":{\"size\":100,\"hashes\":{}},\"repacked\":{},\"files\":[{\"file_path\":\"Data/main<unsafe>.esp\",\"file_size\":13661,\"file_hashes\":{\"sha256\":\"ignored\"}},{\"file_path\":\"empty.txt\",\"file_size\":0}]}"
+        };
+        using (var api = Api(server))
+        {
+            var result = JsonTools.Dict(await Preview(api)); var rows = JsonTools.Array(result["entries"]);
+            Check((bool)result["available"] && rows.Length == 2 && rows.All(row => !(bool)JsonTools.Dict(row)["isDirectory"]), "Current Nexus manifests return exact files without fabricating folder records");
+            Check(JsonTools.Text(JsonTools.Dict(rows[0]), "path") == "Data/main<unsafe>.esp" && JsonTools.Long(JsonTools.Dict(rows[0]), "size") == 13661 && JsonTools.Long(JsonTools.Dict(rows[1]), "size") == 0,
+                "Current manifest file paths and exact byte sizes are preserved, including zero-byte files");
+            Check(server.Requests.Count == 2 && server.Requests[1].Host == "mod-file-manifests.nexusmods.com" && server.ApiAuthorized && !server.MetadataAuthorized,
+                "Current manifest requests use the new Nexus host without receiving the API key");
+        }
+        server = new FilePreviewHandler { Link = ModernLink, Json = "{\"version\":1,\"files\":[{\"file_path\":\"Data\\\\large.bin\",\"file_size\":5000000001}]}" };
+        using (var api = Api(server))
+        {
+            var rows = JsonTools.Array(JsonTools.Dict(await Preview(api))["entries"]);
+            Check(rows.Length == 1 && JsonTools.Text(JsonTools.Dict(rows[0]), "path") == "Data/large.bin" && JsonTools.Long(JsonTools.Dict(rows[0]), "size") == 5000000001L,
+                "Current manifests normalize separators and retain byte sizes larger than 32 bits");
+        }
+        server = new FilePreviewHandler { Link = ModernLink, Json = "{\"version\":1,\"files\":[]}" };
+        using (var api = Api(server))
+        {
+            var result = JsonTools.Dict(await Preview(api));
+            Check((bool)result["available"] && JsonTools.Array(result["entries"]).Length == 0, "An empty current manifest remains an available empty archive");
+        }
+        server = new FilePreviewHandler { Link = "https://mod-file-manifests.nexusmods.com/manifests/next-format.json?version=1", Json = "{\"version\":1,\"files\":[{\"file_path\":\"future.bin\",\"file_size\":1}]}" };
+        using (var api = Api(server))
+        {
+            var result = JsonTools.Dict(await Preview(api));
+            Check((bool)result["available"] && JsonTools.Array(result["entries"]).Length == 1 && !server.MetadataAuthorized,
+                "API-provided modern preview paths do not depend on today's UUID route shape");
+        }
+        server = new FilePreviewHandler { Link = ModernLink, Json = "{\"version\":1,\"files\":[{\"file_path\":\"large-index.bin\",\"file_size\":12}],\"additive_metadata\":\"" + new string('x', 5 * 1024 * 1024) + "\"}" };
+        using (var api = Api(server))
+        {
+            var result = JsonTools.Dict(await Preview(api));
+            Check((bool)result["available"] && JsonTools.Array(result["entries"]).Length == 1,
+                "Current manifests larger than the old four-megabyte limit load within the new bounded limit");
+        }
+        foreach (string body in new[] {
+            "{\"version\":2,\"files\":[]}", "{\"files\":[]}", "{\"version\":1,\"files\":null}", "{\"version\":1,\"files\":{}}",
+            "{\"version\":1,\"files\":[null]}", "{\"version\":1,\"files\":[{\"file_size\":1}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"\",\"file_size\":1}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":123,\"file_size\":1}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"bad.bin\"}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"bad.bin\",\"file_size\":-1}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"bad.bin\",\"file_size\":true}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"bad.bin\",\"file_size\":1.5}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"bad.bin\",\"file_size\":9223372036854775808}]}",
+            "{\"version\":1,\"files\":[{\"file_path\":\"bad.bin\",\"file_size\":\"large\"}]}" })
+        {
+            server = new FilePreviewHandler { Link = ModernLink, Json = body };
+            using (var api = Api(server)) Check(await Rejected(api), "Unsupported or malformed current manifests return a controlled error instead of an empty archive");
+        }
         server = new FilePreviewHandler { Link = "" };
         using (var api = Api(server))
         {
@@ -112,7 +168,12 @@ internal static class FilePreviewTests
             "https://user:pass@file-metadata.nexusmods.com/file/nexus-files-s3-meta/test.json",
             "https://file-metadata.nexusmods.com:444/file/nexus-files-s3-meta/test.json",
             "https://file-metadata.nexusmods.com/file/nexus-files-s3-meta/test.json#fragment",
-            "https://file-metadata.nexusmods.com/other/test.json" })
+            "https://file-metadata.nexusmods.com/other/test.json",
+            "http://mod-file-manifests.nexusmods.com/7d/10/4d/7d104d12-3456-4789-9012-3456789abcde",
+            "https://mod-file-manifests.nexusmods.com.evil.invalid/7d/10/4d/7d104d12-3456-4789-9012-3456789abcde",
+            "https://user:pass@mod-file-manifests.nexusmods.com/7d/10/4d/7d104d12-3456-4789-9012-3456789abcde",
+            "https://mod-file-manifests.nexusmods.com:444/7d/10/4d/7d104d12-3456-4789-9012-3456789abcde",
+            ModernLink + "#fragment", "https://mod-file-manifests.nexusmods.com/" })
         {
             server = new FilePreviewHandler { Link = link };
             using (var api = Api(server)) Check(await Rejected(api) && server.Requests.Count == 1, "Unsafe or unsupported preview addresses are rejected before contacting them");
@@ -131,7 +192,7 @@ internal static class FilePreviewTests
         }
         server = new FilePreviewHandler { OversizedHeader = true };
         using (var api = Api(server)) Check(await Rejected(api), "The manifest size limit rejects an oversized advertised response");
-        server = new FilePreviewHandler { ResponseStream = new PreviewTestStream { Data = new byte[4 * 1024 * 1024 + 1] } };
+        server = new FilePreviewHandler { ResponseStream = new PreviewTestStream { Data = new byte[16 * 1024 * 1024 + 1] } };
         using (var api = Api(server)) Check(await Rejected(api) && ((PreviewTestStream)server.ResponseStream).Disposed, "An unknown-length oversized stream is bounded and disposed");
         server = new FilePreviewHandler { Json = "{\"children\":[]}" };
         using (var api = Api(server))
@@ -144,6 +205,12 @@ internal static class FilePreviewTests
         {
             var result = JsonTools.Dict(await Preview(api));
             Check((bool)result["truncated"] && JsonTools.Array(result["entries"]).Length == 10000, "Large archive listings are bounded and report truncation");
+        }
+        server = new FilePreviewHandler { Link = ModernLink, Json = JsonTools.Serializer().Serialize(new { version = 1, files = Enumerable.Range(0, 10001).Select(n => new { file_path = "Data/file" + n, file_size = 1 }).ToArray() }) };
+        using (var api = Api(server))
+        {
+            var result = JsonTools.Dict(await Preview(api));
+            Check((bool)result["truncated"] && JsonTools.Array(result["entries"]).Length == 10000, "Current archive listings keep the entry bound and explicit truncation notice");
         }
         server = new FilePreviewHandler();
         using (var api = Api(server)) using (var cancel = new CancellationTokenSource())
@@ -190,6 +257,15 @@ internal static class FilePreviewTests
         {
             var result = JsonTools.Dict(await api.FileContentsAsync("baldursgate3", 3423, 23974));
             Check((bool)result["available"] && JsonTools.Array(result["entries"]).Length >= 2, "Live read-only Nexus preview contains the known archive's file listing");
+            foreach (var file in new[] {
+                new { Domain = "baldursgate3", Mod = 3423L, File = 133321L },
+                new { Domain = "dragonsdogma2", Mod = 1311L, File = 10891L },
+                new { Domain = "cyberpunk2077", Mod = 5091L, File = 167135L } })
+            {
+                result = JsonTools.Dict(await api.FileContentsAsync(file.Domain, file.Mod, file.File));
+                Check((bool)result["available"] && JsonTools.Array(result["entries"]).Length > 0,
+                    "Live current Nexus preview loads for " + file.Domain + " mod " + file.Mod + " file " + file.File);
+            }
         }
     }
 }
