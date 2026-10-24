@@ -139,16 +139,17 @@ namespace NexusM
         }
         internal object ClearDownloadFolder(Func<DownloadFolderPlan, bool> confirm = null, Action<string> delete = null) {
             RequireFolderAvailable(); RequireIdleDownloads();
-            var plan = DownloadFolderCleanup.Prepare(Folder, new[] { Store.Root, AppDomain.CurrentDomain.BaseDirectory });
+            var records = Store.Downloads.Concat(Data.Map(Data.Get(Store.State, "fileDownloads")).Values);
+            var plan = DownloadFolderCleanup.Prepare(Folder, new[] { Store.Root, AppDomain.CurrentDomain.BaseDirectory }, records);
             if (plan.Files.Count == 0) {
-                Store.State["notice"] = "There are no files to clear in the download folder. Subfolders were kept.";
+                Store.State["notice"] = "There are no recorded NexusM files to clear. Unrelated files and subfolders were kept.";
                 Store.Save(); Emit(); return Store.PublicState();
             }
             clearingDownloadFolder = true; Store.State["clearingDownloadFolder"] = true; Emit();
             try {
                 bool approved = confirm != null ? confirm(plan) : MessageBox.Show(window,
-                    "Permanently delete " + plan.Files.Count + " files from this folder?\n\n" + plan.Folder +
-                    "\n\nThis bypasses the Recycle Bin and cannot be undone. It includes downloaded archives, unfinished downloads, and other files directly in this folder. Subfolders and your download history will be kept.",
+                    "Permanently delete " + plan.Files.Count + (plan.Files.Count == 1 ? " NexusM file" : " NexusM files") + " from this folder?\n\n" + plan.Folder +
+                    "\n\nThis bypasses the Recycle Bin and cannot be undone. Only recorded NexusM downloads and its verified partial files and resume sidecars will be deleted. Unrelated files, subfolders, and your download history will be kept.",
                     "Clear download folder", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
                 if (!approved) return Store.PublicState();
                 if (disposed) throw new OperationCanceledException();
@@ -158,7 +159,7 @@ namespace NexusM
                     (result.Cancelled ? " Cleanup was cancelled." : "") +
                     (result.Failed > 0 ? " " + result.Failed + (result.Failed == 1 ? " file could" : " files could") + " not be deleted." : "") +
                     (result.Skipped > 0 ? " " + result.Skipped + (result.Skipped == 1 ? " file was" : " files were") + " skipped." : "") +
-                    " Subfolders and download history were kept.";
+                    " Unrelated files, subfolders, and download history were kept.";
                 return Store.PublicState();
             }
             finally {
@@ -496,6 +497,8 @@ namespace NexusM
             string status = Data.Str(value, "status");
             if (!new[] { "completed", "failed", "cancelled", "interrupted" }.Contains(status)) status = "interrupted";
             var row = Data.Obj("id", id, "gameDomain", domain, "modId", modId, "fileId", fileId, "name", Data.Str(value, "name"), "filename", Data.Str(value, "filename"), "status", status, "downloadedBytes", Data.Num(value, "downloadedBytes"), "totalBytes", Data.Num(value, "totalBytes"), "path", Data.Str(value, "path"), "version", Data.Str(value, "version"), "downloadedAt", Data.Num(value, "downloadedAt"), "error", Data.Str(value, "error"));
+            foreach (string field in new[] { "fileLength", "fileCreatedUtcTicks", "fileModifiedUtcTicks" })
+                if (Data.Map(value).ContainsKey(field)) row[field] = Data.Num(value, field);
             if (!Store.Downloads.Any(x => Data.Str(x, "id") == id)) Store.Downloads.Add(row);
             if (status == "completed") { var fileHistory = Data.Map(Data.Get(Store.State, "fileDownloads")); if (Data.Num(Data.Get(fileHistory, id), "downloadedAt") <= Data.Num(row, "downloadedAt")) fileHistory[id] = row; Store.State["fileDownloads"] = fileHistory; }
         }

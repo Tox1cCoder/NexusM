@@ -39,7 +39,11 @@ namespace NexusM
                 Check("Your games filter defaults on, persists boolean changes, and rejects malformed payloads safely", TestYourGamesSetting);
                 Check("custom download folders save exactly and survive restart while the default remains Downloads/NexusM", TestDownloadFolderSetting);
                 Check("invalid or unavailable download folders retain the saved path and other settings", TestInvalidDownloadFolderSetting);
-                Check("clearing the download folder confirms the exact files and retains subfolders and all download history", TestClearDownloadFolder);
+                Check("clearing the download folder confirms only NexusM files and retains unrelated files, subfolders, and history", TestClearDownloadFolder);
+                Check("folder cleanup works from persistent file history after the visible queue is cleared", TestClearDownloadFolderAfterClearingList);
+                Check("a folder containing only unrelated files never prompts or deletes anything", TestClearDownloadFolderWithoutOwnedFiles);
+                Check("a file replaced since its recorded download remains untouched before confirmation", TestClearDownloadFolderReplacedFile);
+                Check("backup restore preserves ownership fingerprints and still protects replacement files", TestDownloadOwnershipBackup);
                 Check("cancelled or empty folder cleanup leaves files and history untouched", TestCancelDownloadFolderCleanup);
                 Check("folder cleanup refuses active transfers and pending authorizations before confirmation", TestDownloadFolderActiveGuards);
                 Check("folder cleanup blocks reentrant cleanup, folder changes, and new downloads before API access", TestDownloadFolderBusyGuards);
@@ -445,6 +449,21 @@ namespace NexusM
             return folder;
         }
 
+        private static Dictionary<string, object> OwnedFile(string path, int fileId)
+        {
+            var record = Download(fileId, "completed", Data.Now(), "2.2.3");
+            record["path"] = Path.GetFullPath(path); record["filename"] = Path.GetFileName(path);
+            record["downloadedBytes"] = new FileInfo(path).Length; record["totalBytes"] = new FileInfo(path).Length;
+            return record;
+        }
+
+        private static void RecordOwnedFile(Storage storage, string path, int fileId)
+        {
+            var history = Data.Map(Data.Get(storage.State, "fileDownloads"));
+            history["baldursgate3:5508:" + fileId] = OwnedFile(path, fileId);
+            storage.State["fileDownloads"] = history;
+        }
+
         private static void ExpectCleanupRejected(Action action, string reason)
         {
             bool rejected = false;
@@ -461,14 +480,25 @@ namespace NexusM
         {
             Storage storage = NewStore("clear-folder");
             string folder = CleanupFolder(storage, "archives");
-            string archive = Path.Combine(folder, "main.zip"), partial = Path.Combine(folder, "optional.zip.part"), sidecar = Path.Combine(folder, "main.zip.nexusm.json");
-            File.WriteAllText(archive, "fixture archive"); File.WriteAllText(partial, "fixture partial"); File.WriteAllText(sidecar, "fixture sidecar");
+            string archive = Path.Combine(folder, "main.zip"), partial = Path.Combine(folder, ".nexusm-baldursgate3-5508-99.part"), sidecar = partial + ".json";
+            File.WriteAllText(archive, "fixture archive"); File.WriteAllText(partial, "fixture partial");
+            File.WriteAllText(sidecar, Data.Json.Serialize(Data.Obj("id", "baldursgate3:5508:99", "total", 1000, "etag", "\"fixture\"", "lastModified", "")));
+            string unrelatedText = Path.Combine(folder, "personal-notes.txt"), unrelatedZip = Path.Combine(folder, "manual-download.zip");
+            string unrelatedSidecar = Path.Combine(folder, "main.zip.nexusm.json"), unrelatedPartial = Path.Combine(folder, ".nexusm-baldursgate3-5508-77.part");
+            File.WriteAllText(unrelatedText, "personal fixture"); File.WriteAllText(unrelatedZip, "manual fixture");
+            File.WriteAllText(unrelatedSidecar, "unrelated sidecar fixture"); File.WriteAllText(unrelatedPartial, "unproven partial fixture");
             string nested = Path.Combine(folder, "keep-subfolder"); Directory.CreateDirectory(nested);
             string nestedFile = Path.Combine(nested, "keep.zip"); File.WriteAllText(nestedFile, "nested fixture");
             storage.Mods.Add(Data.Obj("gameDomain", "baldursgate3", "modId", 5508, "lastDownloadedAt", 1792100000, "reviewedAt", 1792000000, "needsReview", true));
-            storage.Downloads.Add(Download(42, "completed", 1792200000, "2.2.3"));
+            storage.Downloads.Add(OwnedFile(archive, 42));
             storage.Downloads.Add(Download(99, "failed", 0, "2.2.1"));
-            storage.State["fileDownloads"] = Data.Obj("baldursgate3:5508:42", Download(42, "completed", 1792200000, "2.2.3"));
+            RecordOwnedFile(storage, archive, 42);
+            RecordOwnedFile(storage, nestedFile, 88);
+            string elsewhere = Path.Combine(root, "clear-folder-other-location"); Directory.CreateDirectory(elsewhere);
+            string outside = Path.Combine(elsewhere, "outside-only.zip"), sameNameUnrelated = Path.Combine(folder, "outside-only.zip");
+            File.WriteAllText(outside, "old folder fixture"); File.WriteAllText(sameNameUnrelated, "current unrelated fixture"); RecordOwnedFile(storage, outside, 77);
+            var filenameOnly = Download(66, "completed", Data.Now(), "2.2.3"); filenameOnly["path"] = ""; filenameOnly["filename"] = "manual-download.zip";
+            Data.Map(storage.State["fileDownloads"])["baldursgate3:5508:66"] = filenameOnly;
             string modsBefore = Data.Json.Serialize(storage.Mods), queueBefore = Data.Json.Serialize(storage.Downloads), filesBefore = Data.Json.Serialize(Data.Get(storage.State, "fileDownloads"));
             WithController(storage, delegate(Controller controller)
             {
@@ -478,7 +508,7 @@ namespace NexusM
                     confirmations++;
                     Expect(Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup was not busy during its confirmation callback.");
                     Expect(String.Equals(plan.Folder, Path.GetFullPath(folder), StringComparison.OrdinalIgnoreCase), "Confirmation received a different download folder.");
-                    Expect(plan.Files.Count == 3 && plan.Files.OrderBy(x => x).SequenceEqual(new[] { archive, partial, sidecar }.OrderBy(x => x)), "Confirmation did not contain exactly the direct files.");
+                    Expect(plan.Files.Count == 3 && plan.Files.OrderBy(x => x).SequenceEqual(new[] { archive, partial, sidecar }.OrderBy(x => x)), "Confirmation did not contain exactly the proven NexusM files.");
                     Expect(plan.Files.IsReadOnly, "The confirmed file list should be read-only.");
                     return true;
                 }, delegate(string path)
@@ -486,8 +516,11 @@ namespace NexusM
                     Expect(Data.Bool(storage.State, "clearingDownloadFolder"), "Cleanup stopped being busy before file deletion completed.");
                     File.Delete(path); deleted++;
                 });
-                Expect(confirmations == 1 && deleted == 3, "Confirmed cleanup did not process every direct file exactly once.");
-                Expect(Directory.Exists(folder) && Directory.GetFiles(folder).Length == 0, "Cleanup removed the folder or left direct files behind.");
+                Expect(confirmations == 1 && deleted == 3, "Confirmed cleanup did not process every proven NexusM file exactly once.");
+                Expect(Directory.Exists(folder) && !File.Exists(archive) && !File.Exists(partial) && !File.Exists(sidecar), "Cleanup removed the folder or retained an owned file.");
+                Expect(File.ReadAllText(unrelatedText) == "personal fixture" && File.ReadAllText(unrelatedZip) == "manual fixture", "Cleanup changed unrelated text or archive files.");
+                Expect(File.ReadAllText(unrelatedSidecar) == "unrelated sidecar fixture" && File.ReadAllText(unrelatedPartial) == "unproven partial fixture", "Cleanup guessed ownership from a sidecar or partial filename.");
+                Expect(File.ReadAllText(outside) == "old folder fixture" && File.ReadAllText(sameNameUnrelated) == "current unrelated fixture", "Cleanup used a filename from another folder instead of its exact recorded path.");
                 Expect(File.ReadAllText(nestedFile) == "nested fixture", "Cleanup changed a subfolder's contents.");
                 Expect(Data.Str(result, "notice").Contains("Permanently deleted 3 files."), "Cleanup should report the permanent deletion count.");
                 ExpectCleanupIdle(result, "Successful cleanup response");
@@ -501,11 +534,95 @@ namespace NexusM
                 "Folder cleanup failed to retain the library and successful file history after restart.");
         }
 
+        private static void TestClearDownloadFolderAfterClearingList()
+        {
+            Storage storage = NewStore("clear-folder-after-list");
+            string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "recorded.zip"), unrelated = Path.Combine(folder, "keep.zip");
+            File.WriteAllText(archive, "recorded archive fixture"); File.WriteAllText(unrelated, "unrelated archive fixture");
+            storage.Downloads.Add(OwnedFile(archive, 42));
+            WithController(storage, delegate(Controller controller)
+            {
+                controller.Handle("clearDownloads", null).GetAwaiter().GetResult();
+                Expect(storage.Downloads.Count == 0, "The visible queue was not cleared before folder cleanup.");
+                int confirmed = 0;
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmed++; Expect(plan.Files.SequenceEqual(new[] { archive }), "Persistent history did not identify exactly the recorded archive."); return true; }, File.Delete);
+                Expect(confirmed == 1 && !File.Exists(archive) && File.ReadAllText(unrelated) == "unrelated archive fixture", "Clearing the visible list lost ownership evidence or allowed unrelated deletion.");
+                Expect(Data.Get(Data.Get(storage.State, "fileDownloads"), "baldursgate3:5508:42") != null && storage.Downloads.Count == 0, "Folder cleanup removed the persistent downloaded flag or rebuilt the queue.");
+            });
+        }
+
+        private static void TestClearDownloadFolderWithoutOwnedFiles()
+        {
+            Storage storage = NewStore("clear-folder-unrelated-only");
+            string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "manual.zip"), text = Path.Combine(folder, "notes.txt");
+            File.WriteAllText(archive, "manual fixture"); File.WriteAllText(text, "personal fixture");
+            WithController(storage, delegate(Controller controller)
+            {
+                int confirmed = 0, deleted = 0;
+                object result = controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmed++; return true; }, delegate { deleted++; });
+                Expect(confirmed == 0 && deleted == 0, "Unrelated files reached the confirmation or deletion callback.");
+                Expect(File.ReadAllText(archive) == "manual fixture" && File.ReadAllText(text) == "personal fixture", "Unrelated-only cleanup changed files.");
+                Expect(!Data.Bool(result, "clearingDownloadFolder"), "Unrelated-only cleanup left a busy state.");
+            });
+        }
+
+        private static void TestClearDownloadFolderReplacedFile()
+        {
+            Storage storage = NewStore("clear-folder-replaced-file");
+            string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "recorded.zip");
+            File.WriteAllText(archive, "original fixture");
+            var record = OwnedFile(archive, 42); var file = new FileInfo(archive);
+            record["fileLength"] = file.Length; record["fileCreatedUtcTicks"] = file.CreationTimeUtc.Ticks; record["fileModifiedUtcTicks"] = file.LastWriteTimeUtc.Ticks;
+            storage.State["fileDownloads"] = Data.Obj("baldursgate3:5508:42", record);
+            File.WriteAllText(archive, "replaced fixture");
+            File.SetLastWriteTimeUtc(archive, file.LastWriteTimeUtc.AddMinutes(5));
+            WithController(storage, delegate(Controller controller)
+            {
+                int confirmed = 0, deleted = 0;
+                controller.ClearDownloadFolder(delegate(DownloadFolderPlan plan) { confirmed++; return true; }, delegate { deleted++; });
+                Expect(confirmed == 0 && deleted == 0 && File.ReadAllText(archive) == "replaced fixture", "A stale recorded path was mistaken for the original app download.");
+                Expect(!Data.Bool(storage.PublicState(), "clearingDownloadFolder"), "Replaced-file cleanup left a busy state.");
+            });
+        }
+
+        private static void TestDownloadOwnershipBackup()
+        {
+            Storage original = NewStore("ownership-backup-original");
+            string folder = CleanupFolder(original, "archives"), archive = Path.Combine(folder, "recorded.zip");
+            File.WriteAllText(archive, "AAA fixture");
+            var record = OwnedFile(archive, 42); var file = new FileInfo(archive);
+            record["fileLength"] = file.Length; record["fileCreatedUtcTicks"] = file.CreationTimeUtc.Ticks; record["fileModifiedUtcTicks"] = file.LastWriteTimeUtc.Ticks;
+            original.State["fileDownloads"] = Data.Obj("baldursgate3:5508:42", record);
+            object backup = null;
+            WithController(original, delegate(Controller controller) { backup = controller.ExportData(); });
+            Storage restored = NewStore("ownership-backup-restored"); restored.Settings["downloadFolder"] = folder;
+            WithController(restored, delegate(Controller controller)
+            {
+                Import(controller, backup);
+                object saved = Data.Get(Data.Get(restored.State, "fileDownloads"), "baldursgate3:5508:42");
+                foreach (string field in new[] { "fileLength", "fileCreatedUtcTicks", "fileModifiedUtcTicks" })
+                    Expect(Data.Num(saved, field) == Data.Num(record, field), "Backup restore lost the " + field + " ownership field.");
+                int confirmations = 0, deletions = 0;
+                Func<DownloadFolderPlan, bool> confirm = delegate(DownloadFolderPlan plan)
+                {
+                    confirmations++; Expect(plan.Files.SequenceEqual(new[] { archive }), "The restored ownership record did not identify the original archive."); return false;
+                };
+                Action<string> delete = delegate { deletions++; };
+                controller.ClearDownloadFolder(confirm, delete);
+                Expect(confirmations == 1 && deletions == 0, "The intact restored archive was not eligible for confirmed cleanup.");
+                File.WriteAllText(archive, "BBB fixture");
+                File.SetLastWriteTimeUtc(archive, new DateTime(Data.Num(record, "fileModifiedUtcTicks"), DateTimeKind.Utc).AddMinutes(5));
+                controller.ClearDownloadFolder(confirm, delete);
+                Expect(confirmations == 1 && deletions == 0 && File.ReadAllText(archive) == "BBB fixture", "Restoring a backup downgraded fingerprint validation to a size-only match.");
+            });
+        }
+
         private static void TestCancelDownloadFolderCleanup()
         {
             Storage storage = NewStore("cancel-clear-folder");
             string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "keep.zip");
             File.WriteAllText(archive, "keep fixture");
+            RecordOwnedFile(storage, archive, 42);
             WithController(storage, delegate(Controller controller)
             {
                 int confirmations = 0, deletes = 0;
@@ -559,6 +676,7 @@ namespace NexusM
             Storage storage = NewStore("busy-clear-folder");
             string folder = CleanupFolder(storage, "archives"), archive = Path.Combine(folder, "keep.zip"), alternative = Path.Combine(root, "busy-clear-folder-uncreated");
             File.WriteAllText(archive, "keep fixture");
+            RecordOwnedFile(storage, archive, 42);
             WithController(storage, delegate(Controller controller)
             {
                 int deleted = 0;
@@ -585,6 +703,7 @@ namespace NexusM
             string folder = CleanupFolder(storage, "archives");
             string first = Path.Combine(folder, "a-main.zip"), second = Path.Combine(folder, "b-optional.zip");
             File.WriteAllText(first, "main fixture"); File.WriteAllText(second, "optional fixture");
+            RecordOwnedFile(storage, first, 42); RecordOwnedFile(storage, second, 99);
             WithController(storage, delegate(Controller controller)
             {
                 bool threw = false;

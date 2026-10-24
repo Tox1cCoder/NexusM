@@ -57,12 +57,12 @@ NexusM captures `nxm://` links inside its own Nexus window automatically. To han
 | Action | What it does | What it keeps |
 | --- | --- | --- |
 | **Downloads → Clear list** | Removes finished, failed, cancelled, interrupted, and waiting entries. Waiting authorization windows close. | Archives, partial files, download history, and active or queued transfers. |
-| **Downloads → Clear download folder** | **Permanently deletes the confirmed files directly in your download folder**, including archives, partial downloads, sidecars, and any other files there. It bypasses the Recycle Bin. | Subfolders and their contents, download records, and Downloaded flags. |
+| **Downloads → Clear download folder** | **Permanently deletes only recorded NexusM downloads and verified NexusM partial files/resume sidecars directly in your download folder.** It bypasses the Recycle Bin. | Unrelated files, unrecorded or renamed archives, subfolders and their contents, download records, and Downloaded flags. |
 | **Settings → Clear cache** | Clears cached browser content and images, which can be fetched again. | Website sign-in, your library, and downloaded archives. |
 
 **Permanent deletion cannot be undone in the app or through the Recycle Bin.** Check the folder path and file count in the confirmation before continuing. This is normal file deletion, not secure data erasure.
 
-Finish or cancel pending downloads before clearing the folder. Use a dedicated folder on a local fixed drive. Drive roots, personal library roots, linked folders, Windows folders, and NexusM's application/data folders are protected. Files added or changed after the confirmation snapshot are skipped; files that cannot be deleted are reported so you can address them and try again.
+Finish or cancel pending downloads before clearing the folder. Cleanup uses exact saved archive paths and matching NexusM resume metadata; it does not select files just because they are ZIPs or resemble a NexusM filename. Clearing the download list keeps the per-file history used to identify completed downloads. Files with insufficient ownership information stay. Use a dedicated folder on a local fixed drive. Drive roots, personal library roots, linked folders, Windows folders, and NexusM's application/data folders are protected. Files added or changed after the confirmation snapshot are skipped; files that cannot be deleted are reported so you can address them and try again.
 
 ## Back up or restore your library
 

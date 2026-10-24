@@ -354,8 +354,11 @@
         window.NexusM.setState({downloads:[],clearingDownloadFolder:false});
         expect(!$('#clear-download-folder-button').disabled,'Archives can remain on disk after the visible list is cleared.');
         expect($('#clear-downloads-button').disabled,'An empty list should still disable Clear list.');
-        expect($('#clear-download-folder-button').title.includes('Permanently deletes files after confirmation'),'The folder control should describe its confirmation and destination.');
-        expect($('.download-cleanup-note').textContent.includes('Clear list removes entries only'),'The two cleanup actions need a visible distinction.');
+        const cleanupTitle=$('#clear-download-folder-button').title,cleanupNote=$('.download-cleanup-note').textContent;
+        expect(cleanupTitle.includes('Permanently deletes only NexusM downloads')&&cleanupTitle.includes('after confirmation'),'The folder control should limit deletion to the app\'s files and describe confirmation.');
+        expect(cleanupTitle.includes('unrelated files')&&cleanupTitle.includes('sidecars'),'The folder control should explain that unrelated files stay and app sidecars can be removed.');
+        expect(cleanupNote.includes('Clear list removes entries only'),'The two cleanup actions need a visible distinction.');
+        expect(cleanupNote.includes('downloads recorded by NexusM, its partial files, and its sidecars')&&cleanupNote.includes('Unrelated files, subfolders, and download history stay.'),'The cleanup note must identify the app-owned files and what is retained.');
       });
       await check('folder cleanup dispatches only its action and preserves file flags and history',async()=>{
         window.NexusM.setState({downloads:[],fileDownloads:fixture.fileDownloads,mods:fixture.mods,clearingDownloadFolder:false});

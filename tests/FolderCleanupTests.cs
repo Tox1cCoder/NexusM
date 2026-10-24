@@ -13,6 +13,7 @@ namespace NexusM
     {
         private static string root;
         private static readonly List<object> checks = new List<object>();
+        private static readonly List<object> ownership = new List<object>();
 
         private static int Main(string[] args)
         {
@@ -22,7 +23,13 @@ namespace NexusM
             try
             {
                 Check("the default cleanup permanently deletes files without adding them to the Recycle Bin", DefaultDeletion);
-                Check("top-level archives and partials are deleted while subfolders and their files remain", TopLevelFiles);
+                Check("only recorded archives and verified app partials are deleted while unrelated files and subfolders remain", TopLevelFiles);
+                Check("a name or extension without ownership evidence never authorizes deletion", NoOwnershipEvidence);
+                Check("legacy records require an exact path, valid identity, completed status, and matching byte count", LegacyOwnership);
+                Check("persisted fingerprints preserve files changed or replaced before cleanup", PersistedFingerprints);
+                Check("newer fingerprint evidence cannot be bypassed by an older legacy record", DuplicateOwnership);
+                Check("verified resume markers work independently from a cleared download list", ResumeMarkers);
+                Check("failed or changed partial files retain their resume marker", FailedPartialKeepsMarker);
                 Check("a plan exposes an immutable snapshot and excludes files added later", PlanSnapshot);
                 Check("empty and missing dedicated folders need no creation or deletion", EmptyFolders);
                 Check("drive, profile, library, Windows, and application roots are protected", ProtectedRoots);
@@ -58,8 +65,19 @@ namespace NexusM
         }
         private static void Expect(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
         private static string Folder(string name) { string path = Path.Combine(root, name); Directory.CreateDirectory(path); return path; }
-        private static string Put(string folder, string name, string content = "fixture archive") { string path = Path.Combine(folder, name); File.WriteAllText(path, content); return path; }
-        private static DownloadFolderPlan Plan(string folder) { return DownloadFolderCleanup.Prepare(folder, new string[0]); }
+        private static string Put(string folder, string name, string content = "fixture archive", bool owned = true) {
+            string path = Path.Combine(folder, name); File.WriteAllText(path, content);
+            if (owned) ownership.Add(Record(path));
+            return path;
+        }
+        private static Dictionary<string, object> Record(string path, bool fingerprint = true) {
+            var file = new FileInfo(path);
+            var result = new Dictionary<string, object> { { "id", "game:1:2" }, { "gameDomain", "game" }, { "modId", 1L }, { "fileId", 2L },
+                { "status", "completed" }, { "path", path }, { "downloadedBytes", file.Length }, { "downloadedAt", 1000L } };
+            if (fingerprint) { result["fileLength"] = file.Length; result["fileCreatedUtcTicks"] = file.CreationTimeUtc.Ticks; result["fileModifiedUtcTicks"] = file.LastWriteTimeUtc.Ticks; }
+            return result;
+        }
+        private static DownloadFolderPlan Plan(string folder) { return DownloadFolderCleanup.Prepare(folder, new string[0], ownership); }
         private static Action<string> Deleter()
         {
             return File.Delete;
@@ -67,7 +85,7 @@ namespace NexusM
         private static void Reject(string folder, params string[] protectedPaths)
         {
             bool rejected = false;
-            try { DownloadFolderCleanup.Prepare(folder, protectedPaths); }
+            try { DownloadFolderCleanup.Prepare(folder, protectedPaths, ownership); }
             catch (ArgumentException) { rejected = true; }
             Expect(rejected, "Unsafe folder was accepted: " + folder);
         }
@@ -75,13 +93,114 @@ namespace NexusM
         private static void TopLevelFiles()
         {
             string folder = Folder("top-level");
-            Put(folder, "main.zip"); Put(folder, "optional.7z"); Put(folder, ".nexusm-game-1-2.part"); Put(folder, ".nexusm-game-1-2.part.json");
+            Put(folder, "main.zip"); Put(folder, "optional.7z");
+            Put(folder, ".nexusm-game-1-2.part", "fixture partial", false);
+            Put(folder, ".nexusm-game-1-2.part.json", "{\"id\":\"game:1:2\",\"total\":100,\"etag\":\"\",\"lastModified\":\"\"}", false);
+            string unrelated = Put(folder, "manual.zip", "not a NexusM download", false), notes = Put(folder, "personal.txt", "keep notes", false);
             string nested = Folder("top-level\\keep"); string retained = Put(nested, "nested.zip");
             DownloadFolderPlan plan = Plan(folder);
             Expect(plan.Files.Count == 4 && plan.Folder == folder, "The snapshot did not contain the four direct files.");
             DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, Deleter());
             Expect(result.Deleted == 4 && result.Failed == 0 && result.Skipped == 0 && !result.Cancelled, "Incorrect top-level delete result.");
-            Expect(File.Exists(retained) && Directory.Exists(folder), "A subfolder or the download folder itself was removed.");
+            Expect(File.Exists(retained) && Directory.Exists(folder) && File.Exists(unrelated) && File.Exists(notes), "An unrelated file, subfolder, or the download folder itself was removed.");
+        }
+
+        private static void NoOwnershipEvidence()
+        {
+            string folder = Folder("no-evidence");
+            Put(folder, "manual.zip", "keep", false); Put(folder, "manual.7z", "keep", false);
+            Put(folder, ".nexusm-game-1-2.part", "a reserved name is not proof", false);
+            Put(folder, "manual.zip.nexusm.json", "{}", false);
+            DownloadFolderPlan plan = DownloadFolderCleanup.Prepare(folder, new string[0], new object[0]);
+            Expect(plan.Files.Count == 0, "An extension or reserved-looking filename was treated as app ownership.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan);
+            Expect(result.Deleted == 0 && Directory.GetFiles(folder).Length == 4, "Unrecorded files were deleted.");
+        }
+
+        private static void LegacyOwnership()
+        {
+            string folder = Folder("legacy-ownership");
+            string known = Put(folder, "known.zip", "known bytes", false);
+            var record = Record(known, false);
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { record }).Files.SequenceEqual(new[] { known }), "A valid legacy completed record was not recognized.");
+            foreach (var mutate in new Action<Dictionary<string, object>>[] {
+                r => r["downloadedBytes"] = 0L, r => r["downloadedBytes"] = 1000L, r => r.Remove("downloadedBytes"),
+                r => r["status"] = "failed", r => r["id"] = "game:1:99", r => r.Remove("id"),
+                r => r["gameDomain"] = "../bad", r => r["modId"] = -1L, r => r["fileId"] = 0L,
+                r => { r["path"] = ""; r["filename"] = "known.zip"; }, r => r["path"] = "known.zip"
+            }) {
+                var invalid = Record(known, false); mutate(invalid);
+                Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { invalid }).Files.Count == 0, "Incomplete or invalid legacy ownership was accepted.");
+            }
+            string other = Put(Folder("legacy-other-folder"), "known.zip", "known bytes", false);
+            var elsewhere = Record(other, false); elsewhere["filename"] = "known.zip";
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { elsewhere }).Files.Count == 0, "An old folder's basename was used to claim a current-folder file.");
+            string child = Folder("legacy-ownership\\child"), nested = Put(child, "nested.zip", "known bytes", false);
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { Record(nested, false) }).Files.Count == 0, "A recorded subfolder file entered direct cleanup.");
+        }
+
+        private static void PersistedFingerprints()
+        {
+            string folder = Folder("persisted-fingerprints"), file = Put(folder, "changed-before.zip", "same size", false);
+            var record = Record(file);
+            File.WriteAllText(file, "new bytes"); File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddDays(-2));
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { record }).Files.Count == 0, "A same-size file changed before cleanup was still claimed by its old fingerprint.");
+            foreach (var mutate in new Action<Dictionary<string, object>>[] {
+                r => r.Remove("fileModifiedUtcTicks"), r => r["fileLength"] = "bad", r => r["fileCreatedUtcTicks"] = 0L, r => r["fileModifiedUtcTicks"] = 1L
+            }) {
+                var invalid = Record(file); mutate(invalid);
+                Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { invalid }).Files.Count == 0, "Invalid fingerprint evidence fell back to the legacy byte count.");
+            }
+            string empty = Put(folder, "empty.zip", "", false);
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { Record(empty) }).Files.Count == 1, "A fingerprinted empty app file was not recognized.");
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { Record(empty, false) }).Files.Count == 0, "A zero-byte legacy record was accepted without stronger ownership evidence.");
+        }
+
+        private static void DuplicateOwnership()
+        {
+            string folder = Folder("duplicate-ownership"), file = Put(folder, "same-path.zip", "same size", false);
+            var fingerprint = Record(file); var legacy = Record(file, false); legacy["downloadedAt"] = 500L;
+            File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddDays(-2));
+            foreach (object[] records in new[] { new object[] { legacy, fingerprint }, new object[] { fingerprint, legacy } })
+                Expect(DownloadFolderCleanup.Prepare(folder, new string[0], records).Files.Count == 0, "An older legacy record bypassed a mismatched fingerprint.");
+            legacy["downloadedAt"] = 1000L;
+            foreach (object[] records in new[] { new object[] { legacy, fingerprint }, new object[] { fingerprint, legacy } })
+                Expect(DownloadFolderCleanup.Prepare(folder, new string[0], records).Files.Count == 0, "A same-date legacy record bypassed fingerprint evidence.");
+            var current = Record(file); current["downloadedAt"] = 1500L;
+            Expect(DownloadFolderCleanup.Prepare(folder, new string[0], new object[] { current, legacy, current }).Files.Count == 1, "Duplicate valid records did not collapse to one confirmed path.");
+        }
+
+        private static void ResumeMarkers()
+        {
+            string folder = Folder("resume-markers");
+            string partial = Put(folder, ".nexusm-game-1-2.part", "partial", false);
+            string marker = Put(folder, ".nexusm-game-1-2.part.json", "{\"id\":\"game:1:2\",\"etag\":\"\\\"revision\\\"\",\"lastModified\":\"\",\"total\":100}", false);
+            string orphan = Put(folder, ".nexusm-game-1-3.part.json", "{\"id\":\"game:1:3\",\"etag\":\"\",\"lastModified\":\"\",\"total\":100}", false);
+            Put(folder, ".nexusm-game-1-4.part", "unproven", false);
+            Put(folder, ".nexusm-game-1-4.part.json", "{\"id\":\"game:1:99\",\"etag\":\"\",\"lastModified\":\"\",\"total\":100}", false);
+            Put(folder, ".nexusm-game-1-5.part.json", "{\"id\":\"game:1:5\"}", false);
+            Put(folder, ".nexusm-game-1-6.part.json", "{\"__type\":\"not-a-resume-record\"}", false);
+            Put(folder, ".nexusm-game-1-7.part.json", "not JSON", false);
+            Put(folder, ".nexusm-game-1-8.part.json", new string('x', 65537), false);
+            Put(folder, ".nexusm-game-1-0.part.json", "{\"id\":\"game:1:0\",\"etag\":\"\",\"lastModified\":\"\",\"total\":100}", false);
+            DownloadFolderPlan plan = DownloadFolderCleanup.Prepare(folder, new string[0], new object[0]);
+            Expect(plan.Files.OrderBy(x => x).SequenceEqual(new[] { partial, marker, orphan }.OrderBy(x => x)), "Resume markers did not select exactly the verified app pair and orphan sidecar.");
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan);
+            Expect(result.Deleted == 3 && !File.Exists(partial) && !File.Exists(marker) && !File.Exists(orphan) && Directory.GetFiles(folder).Length == 7, "Resume cleanup deleted an unrelated or malformed marker.");
+        }
+
+        private static void FailedPartialKeepsMarker()
+        {
+            string folder = Folder("failed-partial");
+            string partial = Put(folder, ".nexusm-game-1-2.part", "partial", false);
+            string marker = Put(folder, ".nexusm-game-1-2.part.json", "{\"id\":\"game:1:2\",\"etag\":\"\",\"lastModified\":\"\",\"total\":100}", false);
+            DownloadFolderPlan plan = DownloadFolderCleanup.Prepare(folder, new string[0], new object[0]);
+            DownloadFolderCleanupResult result = DownloadFolderCleanup.Delete(plan, delegate(string path) { if (path == partial) throw new IOException("Locked fixture partial"); File.Delete(path); });
+            Expect(result.Failed == 1 && result.Skipped == 1 && File.Exists(partial) && File.Exists(marker), "A failed partial lost its resume marker.");
+            plan = DownloadFolderCleanup.Prepare(folder, new string[0], new object[0]);
+            File.WriteAllText(partial, "replacement partial bytes");
+            result = DownloadFolderCleanup.Delete(plan);
+            Expect(result.Deleted == 0 && result.Skipped == 2 && File.Exists(marker), "A changed partial lost its resume marker.");
         }
 
         private static List<string> RecycledFixtureFiles(string folder)
@@ -190,7 +309,7 @@ namespace NexusM
         {
             string protectedRoot = Folder("protected"), child = Folder("protected\\state"), sibling = Folder("protected-sibling");
             Reject(protectedRoot, child); Reject(child, child); Reject(Path.Combine(child, "nested"), child);
-            DownloadFolderPlan plan = DownloadFolderCleanup.Prepare(sibling, new[] { child });
+            DownloadFolderPlan plan = DownloadFolderCleanup.Prepare(sibling, new[] { child }, ownership);
             Expect(plan.Folder == sibling, "A similarly named sibling folder was incorrectly rejected.");
             string normalized = Path.Combine(protectedRoot, "not-used", "..", "state");
             Reject(normalized, child);

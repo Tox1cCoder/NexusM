@@ -95,6 +95,14 @@ namespace NexusM
                         state["status"] = "completed";
                         state["downloadedAt"] = JsonTools.UnixNow();
                         state["speed"] = 0L;
+                        // Keep the exact archive identity so cleanup can leave a
+                        // different file subsequently placed at this path alone.
+                        try {
+                            var saved = new FileInfo(finalPath);
+                            state["fileLength"] = saved.Length;
+                            state["fileCreatedUtcTicks"] = saved.CreationTimeUtc.Ticks;
+                            state["fileModifiedUtcTicks"] = saved.LastWriteTimeUtc.Ticks;
+                        } catch (IOException) { } catch (UnauthorizedAccessException) { }
                         Emit(state);
                         return state;
                     }
