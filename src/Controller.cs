@@ -109,7 +109,14 @@ namespace NexusM
                 if (row == null) throw new ArgumentException("That download is no longer in the queue.");
                 await AuthorizeDownload(Data.Str(row, "gameDomain"), Data.Num(row, "modId"), Data.Num(row, "fileId")); return Store.PublicState();
             }
-            if (action == "openFolder") { Directory.CreateDirectory(Folder); System.Diagnostics.Process.Start("explorer.exe", "\"" + Folder + "\""); return null; }
+            if (action == "openFolder") {
+                string id = Data.Str(p, "id");
+                var row = String.IsNullOrEmpty(id) ? null : Store.Downloads.FirstOrDefault(x => Data.Str(x, "id") == id);
+                string path = Data.Str(row, "path");
+                if (File.Exists(path)) System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + path + "\"");
+                else { Directory.CreateDirectory(Folder); System.Diagnostics.Process.Start("explorer.exe", "\"" + Folder + "\""); }
+                return null;
+            }
             if (action == "openUrl") { window.OpenSafeUrl(Data.Str(p, "url")); return null; }
             if (action == "registerNxm") { RegisterNxm(); Store.Settings["registerNxm"] = true; Store.Save(); Emit(); return Store.PublicState(); }
             if (action == "importWebsite") { window.OpenHistory(Data.Str(p, "gameDomain")); return Data.Obj("opened", true); }

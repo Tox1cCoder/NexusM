@@ -40,7 +40,7 @@ New mods downloaded outside NexusM need another history import or **Add mod**. U
 1. Open a mod and read its **Overview**, **Changelog**, and **Requirements**.
 2. In **Files**, choose **Get this file**, or select several files and choose **Download selected**. Main files and optional files are listed separately.
 3. NexusM opens the website's normal download flow and handles its free-download controls and countdown. Sign in, choose cookie preferences, or complete a browser check if a Nexus window needs your attention.
-4. Follow progress under **Downloads**. Use **Open download folder** to find the completed archives, then install them using the author's instructions or your mod manager.
+4. Follow progress under **Downloads**. Use the folder button beside a completed download to highlight its archive in File Explorer, then install it using the author's instructions or your mod manager. **Open download folder** opens your configured download location.
 
 Downloads run one at a time. Cancelling a download or closing the app keeps its partial file. **Retry** gets fresh authorization and resumes when the server supports it. Existing completed archives are not overwritten.
 
