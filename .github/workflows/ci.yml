@@ -48,8 +48,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build Windows app
-        run: .\build.ps1
+      - name: Build Windows app with a unique version for main pushes
+        env:
+          AUTOMATIC_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          . .\tools\Build-Version.ps1
+          $runNumber = if ($env:AUTOMATIC_RELEASE -eq 'true') { $env:GITHUB_RUN_NUMBER } else { '' }
+          $version = Get-NexusMBuildVersion (Join-Path $env:GITHUB_WORKSPACE 'src\AssemblyInfo.cs') $runNumber
+          .\build.ps1 -AppVersion $version.AssemblyVersion
 
       - name: Ensure WebView2 Runtime is installed
         run: |
@@ -79,7 +85,7 @@ jobs:
 
       - name: Run offline test suites
         run: |
-          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'Refresh', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Startup', 'Package', 'Release')) {
+          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'Refresh', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Startup', 'Version', 'Package', 'Release')) {
             & powershell -NoProfile -ExecutionPolicy Bypass -File ('.\tests\Test-' + $suite + '.ps1')
             if ($LASTEXITCODE -ne 0) { throw ($suite + ' tests failed.') }
           }
@@ -116,7 +122,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish new app version
+    name: Publish verified app release
     needs: [build, release-tests]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
@@ -138,7 +144,7 @@ jobs:
           name: nexusm-windows-x64
           path: release
 
-      - name: Publish only unpublished versions
+      - name: Publish this build and retain existing releases
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}

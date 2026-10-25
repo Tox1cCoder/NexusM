@@ -125,6 +125,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FilePreview.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Startup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Version.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Release.ps1
 ```
@@ -141,21 +142,17 @@ The icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -
 
 ### CI and publishing releases
 
-GitHub Actions builds, runs all offline suites, and packages the app on pushes to `main`, pull requests, version tags, and manual **Windows CI** runs. Each successful build has a `nexusm-windows-x64` artifact containing the portable ZIP and checksum. No personal Nexus API key or repository secret is required.
+Push your changes to `main`. **Windows CI** assigns a new build version, builds and tests that commit, verifies the package checksum, creates the matching tag, and publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases). No manual version edit, tag, release creation, personal Nexus API key, or repository secret is required.
 
-To publish a new version:
+Automatic versions append GitHub's workflow run number to the source version. For example, source `1.5.1.0` built by run 42 publishes `v1.5.1.42` with `NexusM-1.5.1.42-windows-x64.zip`. The executable and Settings display the same version. Each new main push has a different number; rerunning a workflow retains its number and leaves an already published release unchanged. Version stamping changes only generated build files. You can still update the source major, minor, or patch version when planning a named release.
 
-1. Update `AssemblyVersion` and `AssemblyFileVersion` in `src\AssemblyInfo.cs`, and the Settings version in `ui\index.html`. For example, app version `1.5.1.0` publishes as `v1.5.1`.
-2. Commit and push the changes to `main`.
-3. **Windows CI** builds and tests that commit, verifies the package checksum, creates the matching version tag, and publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases).
+Pull requests, version tags, and manual **Windows CI** runs also build, test, and upload a `nexusm-windows-x64` artifact containing the ZIP and checksum. Pull requests and manual runs do not publish. Build jobs have read-only repository access; only the publishing job can create a tag or release using GitHub's built-in workflow token. Publisher fixtures run on both Windows PowerShell and Linux PowerShell before publishing.
 
-Pushing more changes without changing the app version still runs CI but leaves an already published release unchanged. Use a new version for a new downloadable release. Pull requests and manual CI runs build and test without publishing. Build jobs have read-only repository access; only the publishing job can create a tag or release using GitHub's built-in workflow token.
-
-Manually pushing a matching `v<version>` tag is also supported by the same pipeline. A tag that does not match the built version, or an unpublished tag already pointing at a different commit, stops publishing. Existing tags and published assets are never moved or overwritten. A failed asset upload leaves a draft; rerun the failed publishing job after resolving the error so it reuses the original verified build artifact.
-
-If fixing the publisher itself requires a new commit after a failed run already created a tag, use a new app version for that commit. Rerunning the old workflow still uses its old script. Version `1.5.1` includes the empty-draft asset-list fix and can publish without changing the tag or draft left by the failed `1.5.0` run. Publisher fixtures run on both Windows PowerShell and Linux PowerShell before publishing.
+Manually pushing a matching `v<version>` tag is still supported for a named source version, such as `v1.5.1` for `1.5.1.0`. A tag that does not match the built version, or an unpublished tag already pointing at a different commit, stops publishing. Existing tags and published assets are never moved or overwritten. A failed asset upload leaves a draft; rerun the failed publishing job after resolving the error so it reuses the original verified build artifact. Recovering an older draft does not replace a newer build as the Latest download.
 
 For a local package after building, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Package-Release.ps1`. Output goes to `artifacts\release`. Packaging uses an explicit app-file list and refuses to overwrite an existing package; choose a fresh `-OutputDirectory` for another local run.
+
+To reproduce a particular automatic version locally, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion 1.5.1.42`. An optional `-OutputDirectory` keeps that build in a separate folder. All four numeric components must be between 0 and 65534, as required by the Windows assembly version format.
 
 ---
 

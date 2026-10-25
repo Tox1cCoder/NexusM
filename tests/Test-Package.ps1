@@ -1,6 +1,7 @@
 param()
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot
+. (Join-Path $workspace 'tools\Build-Version.ps1')
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('NexusM-PackageTests-' + [Guid]::NewGuid().ToString('N'))
 $fixture = Join-Path $testRoot 'dist'
 $packageScript = Join-Path $workspace 'tools\Package-Release.ps1'
@@ -28,7 +29,7 @@ try {
         [IO.File]::WriteAllText((Join-Path $fixture $relative), 'synthetic fixture; never ship')
     }
     $versionInfo = (Get-Item -LiteralPath (Join-Path $fixture 'NexusM.exe')).VersionInfo
-    $expectedVersion = '{0}.{1}.{2}' -f $versionInfo.FileMajorPart, $versionInfo.FileMinorPart, $versionInfo.FileBuildPart
+    $expectedVersion = (Get-NexusMVersion ('{0}.{1}.{2}.{3}' -f $versionInfo.FileMajorPart, $versionInfo.FileMinorPart, $versionInfo.FileBuildPart, $versionInfo.FilePrivatePart)).Version
     $output = Join-Path $testRoot 'release'
     $result = & $packageScript -DistributionDirectory $fixture -OutputDirectory $output -Tag ('v' + $expectedVersion)
     Assert-Package ((Split-Path $result.Archive -Leaf) -eq ('NexusM-' + $expectedVersion + '-windows-x64.zip')) 'Release archive is named using the built app version'
@@ -40,6 +41,10 @@ try {
         Assert-Package (@(Compare-Object $expected $actual).Count -eq 0) 'ZIP contains only the app, required UI/runtime files, license, and README'
         $readme = $archive.Entries | Where-Object { $_.FullName -eq 'README.md' }
         Assert-Package ($readme.Length -gt 0) 'Portable download includes end-user instructions'
+        $indexEntry = $archive.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq 'ui/index.html' }
+        $reader = New-Object IO.StreamReader($indexEntry.Open())
+        try { $indexContent = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        Assert-Package ($indexContent.Contains('<span class="version">' + $expectedVersion + '</span>')) 'Settings displays the exact packaged executable version'
     }
     finally { $archive.Dispose() }
     $expectedChecksum = (Get-FileHash -LiteralPath $result.Archive -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + (Split-Path $result.Archive -Leaf)
@@ -50,6 +55,13 @@ try {
     $invalidOutput = Join-Path $testRoot 'invalid-tag'
     Assert-Rejected { & $packageScript -DistributionDirectory $fixture -OutputDirectory $invalidOutput -Tag 'v999.0.0' } 'A tag that does not match the app version is rejected'
     Assert-Package (!(Test-Path -LiteralPath $invalidOutput)) 'A mismatched tag creates no release output'
+    $indexPath = Join-Path $fixture 'ui\index.html'
+    $originalIndex = [IO.File]::ReadAllText($indexPath)
+    [IO.File]::WriteAllText($indexPath, $originalIndex.Replace(('<span class="version">' + $expectedVersion + '</span>'), '<span class="version">999.0.0</span>'))
+    $mismatchedUiOutput = Join-Path $testRoot 'mismatched-ui'
+    Assert-Rejected { & $packageScript -DistributionDirectory $fixture -OutputDirectory $mismatchedUiOutput } 'A stale Settings version cannot ship with a different executable version'
+    Assert-Package (!(Test-Path -LiteralPath $mismatchedUiOutput)) 'Mismatched Settings creates no release output'
+    [IO.File]::WriteAllText($indexPath, $originalIndex)
     Remove-Item -LiteralPath (Join-Path $fixture 'ui\app.js')
     $incompleteOutput = Join-Path $testRoot 'incomplete'
     Assert-Rejected { & $packageScript -DistributionDirectory $fixture -OutputDirectory $incompleteOutput } 'An incomplete app distribution cannot be packaged'

@@ -17,22 +17,23 @@ function Assert-ReleaseRejected([scriptblock]$action, [string]$name) {
     try { & $action | Out-Null } catch { $rejected = $true }
     Assert-Release $rejected $name
 }
-function New-Package([string]$name) {
+function New-Package([string]$name, [string]$version = '1.5.0') {
     $directory = Join-Path $testRoot $name
     New-Item -ItemType Directory -Path $directory | Out-Null
-    $archive = Join-Path $directory 'NexusM-1.5.0-windows-x64.zip'
+    $archive = Join-Path $directory ('NexusM-' + $version + '-windows-x64.zip')
     [IO.File]::WriteAllBytes($archive, [byte[]](80, 75, 3, 4, 78, 101, 120, 117, 115, 77))
     $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText(($archive + '.sha256'), ($hash + '  ' + (Split-Path $archive -Leaf) + "`n"), (New-Object Text.UTF8Encoding($false)))
     return $directory
 }
 function New-Server {
-    return @{ Calls = (New-Object 'Collections.Generic.List[object]'); Published = $false; Ref = $null; Release = $null; Assets = @(); EnumerateAssets = $false; Annotated = @{}; FailUpload = $false; BadUpload = $false }
+    return @{ Calls = (New-Object 'Collections.Generic.List[object]'); Published = $false; Ref = $null; Release = $null; Latest = $null; Assets = @(); EnumerateAssets = $false; Annotated = @{}; FailUpload = $false; BadUpload = $false }
 }
 function Request-For($server) {
     return {
         param($method, $path, $body, $file, $mime)
         $server.Calls.Add([PSCustomObject]@{ Method = $method; Path = $path; Body = $body; File = $file; Mime = $mime })
+        if ($method -eq 'GET' -and $path -like '*/releases/latest') { return $server.Latest }
         if ($method -eq 'GET' -and $path -like '*/releases/tags/*') { return $server.Release }
         if ($method -eq 'GET' -and $path -like '*/git/ref/tags/*') { return $server.Ref }
         if ($method -eq 'GET' -and $path -like '*/git/tags/*') { return $server.Annotated[($path.Split('/')[-1])] }
@@ -55,8 +56,8 @@ function Request-For($server) {
         throw ('Unexpected fixture request: ' + $method + ' ' + $path)
     }.GetNewClosure()
 }
-function Publish-With($server, [string]$directory, [string]$sha = $commit) {
-    Invoke-NexusMRelease -Repository 'fixture/repo' -Commit $sha -PackageDirectory $directory -ExpectedTag 'v1.5.0' -Request (Request-For $server)
+function Publish-With($server, [string]$directory, [string]$sha = $commit, [string]$tag = 'v1.5.0') {
+    Invoke-NexusMRelease -Repository 'fixture/repo' -Commit $sha -PackageDirectory $directory -ExpectedTag $tag -Request (Request-For $server)
 }
 function Fixture-Asset([string]$path) {
     return @{ name = (Split-Path $path -Leaf); size = (Get-Item -LiteralPath $path).Length; digest = 'sha256:' + (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
@@ -88,6 +89,26 @@ try {
     Assert-Release ($last.Method -eq 'PATCH' -and $last.Body.draft -eq $false) 'Publishing is the final operation after asset verification'
     $server.Calls.Clear(); $result = Publish-With $server $directory $otherCommit
     Assert-Release ($result.Status -eq 'Already published' -and $server.Calls.Count -eq 1 -and $server.Calls[0].Method -eq 'GET') 'Further pushes at the same app version leave its release and tag unchanged'
+
+    foreach ($number in @(6, 7)) {
+        $autoVersion = '1.5.1.' + $number
+        $automatic = New-Package ('automatic-' + $number) $autoVersion
+        $server = New-Server
+        $result = Publish-With $server $automatic $commit ('v' + $autoVersion)
+        Assert-Release ($result.Status -eq 'Published' -and $result.Tag -ceq ('v' + $autoVersion)) ('An automatic build publishes independently without a source version bump: ' + $autoVersion)
+        $last = $server.Calls[$server.Calls.Count - 1]
+        Assert-Release ($last.Body.make_latest -ceq 'true') 'A new automatic build becomes the Latest download'
+        $server.Calls.Clear(); $result = Publish-With $server $automatic $commit ('v' + $autoVersion)
+        Assert-Release ($result.Status -eq 'Already published' -and $server.Calls.Count -eq 1) 'Rerunning an automatic build never replaces its published files'
+    }
+    $server = New-Server; $server.Latest = @{ tag_name = 'v1.5.1.99' }
+    $automatic = New-Package 'delayed-automatic' '1.5.1.8'
+    $result = Publish-With $server $automatic $commit 'v1.5.1.8'
+    Assert-Release ($result.Status -eq 'Published' -and $server.Calls[$server.Calls.Count - 1].Body.make_latest -ceq 'false') 'Recovering an older failed draft does not move Latest behind a newer build'
+    foreach ($invalidVersion in @('01.5.1', '1.5.1.0', '1.5.1.65535')) {
+        $invalid = New-Package ('invalid-' + $invalidVersion) $invalidVersion
+        Assert-ReleaseRejected { Get-NexusMReleasePackage $invalid } ('Noncanonical or unsupported app versions cannot publish: ' + $invalidVersion)
+    }
 
     $server = New-Server; $server.Ref = @{ object = @{ type = 'commit'; sha = $otherCommit } }
     Assert-ReleaseRejected { Publish-With $server $directory } 'An unpublished version tag on another commit is never moved'
@@ -132,6 +153,7 @@ try {
     Assert-Release ($workflow -match '(?s)  release-tests:.*?runs-on: ubuntu-latest.*?shell: pwsh.*?run:.*?tests/Test-Release.ps1') 'Publisher fixtures also run under the production Linux PowerShell runtime'
     Assert-Release ($workflow -match "if: github.event_name == 'push' && \(github.ref == 'refs/heads/main'" -and $workflow -match 'persist-credentials: false') 'Pull requests cannot run the publishing job or retain checkout credentials'
     Assert-Release ($workflow -match "cancel-in-progress: \`$\{\{ github.event_name == 'pull_request' \}\}" -and $workflow -match 'group: publish-\$\{\{ needs.build.outputs.release_tag \}\}') 'Main releases cannot be cancelled halfway through publishing and duplicate versions are serialized'
+    Assert-Release ($workflow -match "AUTOMATIC_RELEASE: \`$\{\{ github.event_name == 'push' && github.ref == 'refs/heads/main' \}\}" -and $workflow -match 'GITHUB_RUN_NUMBER' -and $workflow -match 'build.ps1 -AppVersion') 'Each main push gets its own compiled version before tests and packaging'
     Write-Host ('Passed ' + $script:checks + ' release automation checks; no real GitHub requests were made.')
 }
 finally {

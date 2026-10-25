@@ -5,21 +5,22 @@ param(
     [string]$ExpectedTag = ''
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Build-Version.ps1')
 
 function Get-NexusMReleasePackage([string]$Directory, [string]$Tag = '') {
     $files = @(Get-ChildItem -LiteralPath $Directory -File)
     $archives = @($files | Where-Object { $_.Name -like '*.zip' })
     if ($archives.Count -ne 1 -or $files.Count -ne 2) { throw 'The verified release must contain exactly one app ZIP and its checksum.' }
     $archive = $archives[0]
-    if ($archive.Name -cnotmatch '^NexusM-(\d+\.\d+\.\d+)-windows-x64\.zip$') { throw 'The app ZIP has an invalid release filename.' }
+    if ($archive.Name -cnotmatch '^NexusM-(\d+\.\d+\.\d+(?:\.\d+)?)-windows-x64\.zip$') { throw 'The app ZIP has an invalid release filename.' }
     $version = $Matches[1]
-    if (([version]$version).ToString(3) -cne $version) { throw 'The app version must use three canonical numeric components.' }
+    if ((Get-NexusMVersion $version).Version -cne $version) { throw 'The app version must use three or four canonical numeric components.' }
     $releaseTag = 'v' + $version
     if ($Tag -and $Tag -cne $releaseTag) { throw 'The requested release tag does not match the verified app package.' }
     $checksum = Join-Path $Directory ($archive.Name + '.sha256')
     if (!(Test-Path -LiteralPath $checksum -PathType Leaf)) { throw 'The app ZIP checksum is missing.' }
     $line = (Get-Content -LiteralPath $checksum -Raw).Trim()
-    if ($line -cnotmatch '^([a-fA-F0-9]{64})  (NexusM-\d+\.\d+\.\d+-windows-x64\.zip)$' -or $Matches[2] -cne $archive.Name) {
+    if ($line -cnotmatch '^([a-fA-F0-9]{64})  (NexusM-\d+\.\d+\.\d+(?:\.\d+)?-windows-x64\.zip)$' -or $Matches[2] -cne $archive.Name) {
         throw 'The checksum must name exactly the verified app ZIP.'
     }
     $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -51,7 +52,7 @@ function Invoke-NexusMRelease {
     $base = '/repos/' + $Repository
     $release = & $Request 'GET' ($base + '/releases/tags/' + $package.Tag) $null $null $null
     if ($null -ne $release -and !$release.draft) {
-        # Ordinary pushes without a version bump must never replace a published release.
+        # Reruns and explicit version tags must never replace a published release.
         return [PSCustomObject]@{ Status = 'Already published'; Tag = $package.Tag; Url = $release.html_url }
     }
     $reference = & $Request 'GET' ($base + '/git/ref/tags/' + $package.Tag) $null $null $null
@@ -100,7 +101,13 @@ The accompanying `.sha256` file verifies the ZIP download. This portable build d
         $upload = & $Request 'POST' ('https://uploads.github.com' + $base + '/releases/' + $release.id + '/assets?name=' + [Uri]::EscapeDataString($name)) $null $wanted.Path $mime
         if ($upload.name -ne $name -or $upload.size -ne $wanted.Size -or $upload.digest -ne $wanted.Digest) { throw 'GitHub could not verify an uploaded asset; the release remains a draft.' }
     }
-    $published = & $Request 'PATCH' ($base + '/releases/' + $release.id) @{ draft = $false; make_latest = 'legacy' } $null $null
+    $latest = & $Request 'GET' ($base + '/releases/latest') $null $null $null
+    $makeLatest = 'true'
+    if ($null -ne $latest -and $latest.tag_name -cmatch '^v(\d+\.\d+\.\d+(?:\.\d+)?)$') {
+        $latestVersion = Get-NexusMVersion $Matches[1]
+        if ([version]$latestVersion.AssemblyVersion -gt [version](Get-NexusMVersion $package.Version).AssemblyVersion) { $makeLatest = 'false' }
+    }
+    $published = & $Request 'PATCH' ($base + '/releases/' + $release.id) @{ draft = $false; make_latest = $makeLatest } $null $null
     if ($null -eq $published -or $published.draft) { throw 'GitHub did not publish the verified draft release.' }
     [PSCustomObject]@{ Status = 'Published'; Tag = $package.Tag; Url = $published.html_url }
 }

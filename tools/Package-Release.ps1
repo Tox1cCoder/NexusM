@@ -5,6 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot
+. (Join-Path $PSScriptRoot 'Build-Version.ps1')
 $distribution = [IO.Path]::GetFullPath($DistributionDirectory)
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 # Explicit payload prevents local state, credentials, debug files, and stale build files from shipping.
@@ -15,8 +16,11 @@ foreach ($relative in $payload) {
 $readme = Join-Path $workspace 'README.md'
 if (!(Test-Path -LiteralPath $readme -PathType Leaf)) { throw 'The end-user README is missing.' }
 $versionInfo = (Get-Item -LiteralPath (Join-Path $distribution 'NexusM.exe')).VersionInfo
-$version = '{0}.{1}.{2}' -f $versionInfo.FileMajorPart, $versionInfo.FileMinorPart, $versionInfo.FileBuildPart
+$version = (Get-NexusMVersion ('{0}.{1}.{2}.{3}' -f $versionInfo.FileMajorPart, $versionInfo.FileMinorPart, $versionInfo.FileBuildPart, $versionInfo.FilePrivatePart)).Version
 if ($Tag -and $Tag -cne ('v' + $version)) { throw ('Release tag must match the built app version: v' + $version) }
+$indexContent = [IO.File]::ReadAllText((Join-Path $distribution 'ui\index.html'))
+$versionLabels = [regex]::Matches($indexContent, '<span class="version">([^<]+)</span>')
+if ($versionLabels.Count -ne 1 -or $versionLabels[0].Groups[1].Value -cne $version) { throw 'The Settings version does not match the built app version. Run build.ps1 first.' }
 $archive = Join-Path $output ('NexusM-' + $version + '-windows-x64.zip')
 $checksum = $archive + '.sha256'
 if ((Test-Path -LiteralPath $archive) -or (Test-Path -LiteralPath $checksum)) { throw 'Release output already exists. Choose a new output directory; existing release files are never overwritten.' }

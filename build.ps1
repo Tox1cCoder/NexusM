@@ -1,6 +1,13 @@
-param([switch]$Test)
+param(
+    [switch]$Test,
+    [string]$AppVersion = '',
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist')
+)
 $ErrorActionPreference = 'Stop'
 $workspace = $PSScriptRoot
+. (Join-Path $workspace 'tools\Build-Version.ps1')
+$sourceAssemblyInfo = Join-Path $workspace 'src\AssemblyInfo.cs'
+$appVersionInfo = if ($AppVersion) { Get-NexusMVersion $AppVersion } else { Get-NexusMBuildVersion $sourceAssemblyInfo }
 $cache = Join-Path $env:LOCALAPPDATA 'NexusM-BuildCache'
 $version = '1.0.4258.31'
 $package = Join-Path $cache ('webview2.' + $version)
@@ -12,7 +19,7 @@ if (!(Test-Path -LiteralPath $package)) {
     }
     Expand-Archive -LiteralPath $archive -DestinationPath $package
 }
-$output = Join-Path $workspace 'dist'
+$output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $framework = Split-Path $compiler
@@ -29,14 +36,27 @@ foreach ($assembly in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView
 Copy-Item -LiteralPath (Join-Path $package 'runtimes\win-x64\native\WebView2Loader.dll') -Destination $output -Force
 Copy-Item -LiteralPath (Join-Path $workspace 'src\NexusM.exe.config') -Destination $output -Force
 Copy-Item -Path (Join-Path $workspace 'ui') -Destination $output -Recurse -Force
+$builtIndex = Join-Path $output 'ui\index.html'
+$indexContent = [IO.File]::ReadAllText($builtIndex)
+if ([regex]::Matches($indexContent, '<span class="version">[^<]+</span>').Count -ne 1) { throw 'The Settings version label is missing or ambiguous.' }
+$indexContent = [regex]::Replace($indexContent, '<span class="version">[^<]+</span>', ('<span class="version">' + $appVersionInfo.Version + '</span>'))
+[IO.File]::WriteAllText($builtIndex, $indexContent, (New-Object Text.UTF8Encoding($false)))
 if (Test-Path -LiteralPath (Join-Path $package 'LICENSE.txt')) {
     Copy-Item -LiteralPath (Join-Path $package 'LICENSE.txt') -Destination (Join-Path $output 'WebView2-LICENSE.txt') -Force
 }
-$arguments += @(Get-ChildItem -LiteralPath (Join-Path $workspace 'src') -Filter '*.cs' | ForEach-Object { $_.FullName })
-& $compiler @arguments
-if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
+$generatedAssemblyInfo = Join-Path $cache ('AssemblyInfo-' + [Guid]::NewGuid().ToString('N') + '.cs')
+try {
+    $assemblyContent = [IO.File]::ReadAllText($sourceAssemblyInfo)
+    $assemblyContent = [regex]::Replace($assemblyContent, '(\[assembly:\s*Assembly(?:File)?Version\(")[^"]+("\)\])', ('${1}' + $appVersionInfo.AssemblyVersion + '${2}'))
+    [IO.File]::WriteAllText($generatedAssemblyInfo, $assemblyContent, (New-Object Text.UTF8Encoding($false)))
+    $arguments += @(Get-ChildItem -LiteralPath (Join-Path $workspace 'src') -Filter '*.cs' | Where-Object { $_.Name -ne 'AssemblyInfo.cs' } | ForEach-Object { $_.FullName })
+    $arguments += $generatedAssemblyInfo
+    & $compiler @arguments
+    if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
+}
+finally { if (Test-Path -LiteralPath $generatedAssemblyInfo) { Remove-Item -LiteralPath $generatedAssemblyInfo -Force } }
 $size = (Get-ChildItem -LiteralPath $output -Recurse -File | Measure-Object Length -Sum).Sum
-Write-Host ('Built dist\NexusM.exe. Portable app size: {0:N2} MB.' -f ($size / 1MB))
+Write-Host ('Built NexusM {0} at {1}. Portable app size: {2:N2} MB.' -f $appVersionInfo.Version, (Join-Path $output 'NexusM.exe'), ($size / 1MB))
 if ($Test) {
     $report = Join-Path $workspace 'artifacts\self-test.json'
     New-Item -ItemType Directory -Path (Split-Path $report) -Force | Out-Null
