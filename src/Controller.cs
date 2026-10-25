@@ -454,6 +454,10 @@ namespace NexusM
             RequireFolderAvailable(); RequireApi(); domain = JsonTools.Domain(domain); if (modId <= 0 || fileId <= 0) throw new ArgumentException("Choose a mod file first.");
             string id = domain + ":" + modId + ":" + fileId;
             if (transfers.ContainsKey(id)) throw new InvalidOperationException("This file is already downloading.");
+            if (pending.Contains(id)) {
+                window.OpenAuthorization("https://www.nexusmods.com/" + domain + "/mods/" + modId + "?tab=files&file_id=" + fileId + "&nmm=1", id);
+                return;
+            }
             var detail = await Details(domain, modId);
             RequireFolderAvailable();
             var file = Data.List(Data.Get(detail, "files")).FirstOrDefault(x => Data.Num(x, "fileId") == fileId);

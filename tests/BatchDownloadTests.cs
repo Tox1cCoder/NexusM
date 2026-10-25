@@ -30,6 +30,7 @@ namespace NexusM
                         await Check("independent checkbox checks share a four-request network bound", SharedConcurrency);
                         await Check("batch start rechecks current file IDs and newly added choices", FreshValidation);
                         await Check("a mixed batch queues valid mods without opening full mod details and skips duplicate authorizations", MixedBatch);
+                        await Check("Open Nexus reopens a pending single-file authorization without duplicating its download entry", ReopenPendingAuthorization);
                         await Check("overlapping batch starts and folder cleanup are blocked while preparing", BusyGuards);
                         await Check("failed authorization setup leaves a retryable failed queue entry", AuthorizationFailure);
                         await Check("closing the controller cancels file checks without queuing downloads", Cancellation);
@@ -182,6 +183,24 @@ namespace NexusM
                 Expect(rejected && confirmations == 0, "Folder cleanup started while a batch was preparing.");
                 fixture.Server.Release(); await starting;
                 Expect(!fixture.Controller.HasActiveTransfers && fixture.Authorizations.Count == 1, "Batch preparation retained its busy state.");
+            }
+        }
+
+        private static async Task ReopenPendingAuthorization() {
+            using (var fixture = new Fixture("reopen-pending", 1)) {
+                await fixture.Controller.StartBatchDownload(Mods(1), fixture.Authorize);
+                int requests = fixture.Server.Requests.Count;
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(fixture.Controller);
+                using (var unrelated = new CancellationTokenSource()) {
+                    transfers["unrelated-fixture-transfer"] = unrelated;
+                    try {
+                        await fixture.Controller.Handle("retryDownload", Data.Obj("id", "fixturegame:1:10"));
+                        var authorizationQueue = (Queue<string[]>)typeof(MainForm).GetField("authorizations", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(fixture.Form);
+                        Expect(authorizationQueue.Count == 1 && authorizationQueue.Peek()[1] == "fixturegame:1:10", "Open Nexus did not reach the existing browser authorization flow.");
+                        Expect(fixture.Server.Requests.Count == requests && fixture.Store.Downloads.Count == 1, "Reopening an authorization re-fetched metadata or duplicated the download.");
+                    }
+                    finally { transfers.Remove("unrelated-fixture-transfer"); }
+                }
             }
         }
 
