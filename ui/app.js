@@ -17,6 +17,8 @@
   let state = {games:[],mods:[],downloads:[],settings:{yourGamesOnly:true},user:null};
   let activeGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
   let selectedFiles = new Set();
+  const selectedMods = new Set(), batchCandidates = new Map();
+  let preparingBatch = false;
   let filePreviews = new Map();
   let lastFocus = null, lastNotice = null;
   let loadingLibrary = false, refreshPromise = null;
@@ -35,7 +37,7 @@
     if (!bridge) return Promise.reject(new Error('Open NexusM.exe to connect to Nexus and use local files.'));
     const id = String(++sequence);
     return new Promise((resolve,reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error('This request is taking longer than expected. Please try again.')); }, ['refresh','initialize','importData'].includes(action) ? 180000 : 90000);
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('This request is taking longer than expected. Please try again.')); }, ['refresh','initialize','importData','startBatchDownload'].includes(action) ? 180000 : 90000);
       pending.set(id,{resolve,reject,timer});
       bridge.postMessage({id,action,payload});
     });
@@ -118,6 +120,7 @@
     const nextLibrary=JSON.stringify([nextGames,state.settings.yourGamesOnly,state.mods.map(mod=>[modDomain(mod),modId(mod),mod.name,mod.version,mod.author,mod.uploaded_by,picture(mod),timestamp(updated(mod)),timestamp(downloaded(mod)),needsReview(mod)])]);
     const libraryChanged=nextLibrary!==librarySignature;
     const nextDownloads=JSON.stringify(state.downloads),nextSettings=JSON.stringify([state.settings,state.user,state.clearingDownloadFolder]);
+    reconcileBatchSelection();
     if(libraryChanged){
       librarySignature=nextLibrary;gamesSignature=nextGames;
       gameNames=new Map(state.games.map(game=>[gameDomain(game),game.name]));gameModCounts=new Map();
@@ -136,6 +139,95 @@
   const modId = mod => Number(mod.modId ?? mod.mod_id ?? mod.id);
   const fileId = file => Number(file.fileId ?? file.file_id ?? file.id);
   const modKey = mod => `${modDomain(mod)}:${modId(mod)}`;
+  const batchFingerprint = mod => JSON.stringify([mod.version,timestamp(updated(mod))]);
+  const queuedStatuses = new Set(['queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization']);
+  function reconcileBatchSelection(){
+    if(!batchCandidates.size&&!selectedMods.size)return;
+    const mods=new Map(state.mods.map(mod=>[modKey(mod),mod]));
+    for(const [key,candidate] of batchCandidates){
+      const mod=mods.get(key);
+      if(!mod||candidate.fingerprint!==batchFingerprint(mod)||(candidate.status==='alreadyQueued'&&!state.downloads.some(download=>modKey(download)===key&&fileId(download)===Number(candidate.fileId)&&queuedStatuses.has(download.status)))){
+        batchCandidates.delete(key);selectedMods.delete(key);
+      }
+    }
+    for(const key of selectedMods)if(!mods.has(key))selectedMods.delete(key);
+  }
+  function renderBatchControls(){
+    const checking=[...batchCandidates.values()].filter(candidate=>candidate.status==='checking').length;
+    const clearing=state.clearingDownloadFolder===true;
+    const button=$('#download-selected-mods');
+    button.disabled=preparingBatch||clearing||checking>0||selectedMods.size===0;
+    button.classList.toggle('busy',preparingBatch);button.setAttribute('aria-busy',String(preparingBatch));
+    const label=preparingBatch?'Preparing downloads…':`Download selected (${selectedMods.size})`;
+    if(button.textContent!==label)button.textContent=label;
+    $('#clear-mod-selection').disabled=preparingBatch||(!selectedMods.size&&!checking);
+    $('#batch-selection').classList.toggle('hidden',state.mods.length===0);
+    let visibleSelected=0;
+    for(const input of $$('[data-select-mod]')){
+      const key=input.dataset.selectMod,candidate=batchCandidates.get(key),pendingCheck=candidate?.status==='checking';
+      const checked=selectedMods.has(key)||pendingCheck,disabled=preparingBatch||clearing||pendingCheck||['ineligible','alreadyQueued'].includes(candidate?.status);
+      if(input.checked!==checked)input.checked=checked;if(input.disabled!==disabled)input.disabled=disabled;
+      input.setAttribute('aria-busy',String(pendingCheck));
+      const row=input.closest('tr');row.classList.toggle('selected-for-download',selectedMods.has(key));
+      const message=pendingCheck?'Checking files…':['ineligible','failed','alreadyQueued'].includes(candidate?.status)?candidate.reason||(candidate.status==='alreadyQueued'?'This file is already in the download queue.':'Open this mod to choose its files.') :'';
+      const status=$('.batch-mod-status',row);if(status.textContent!==message)status.textContent=message;status.classList.toggle('hidden',!message);
+      const title=message||(candidate?.eligible?`Download ${candidate.name||'the main file'}`:'Check files and select this mod for download');
+      if(input.title!==title)input.title=title;
+      if(selectedMods.has(key))visibleSelected++;
+    }
+    const hidden=selectedMods.size-visibleSelected;
+    const message=checking?`Checking ${checking} ${checking===1?'mod':'mods'}…`:hidden?`${hidden} selected ${hidden===1?'mod is':'mods are'} hidden by the current filters.`:'';
+    if($('#batch-selection-status').textContent!==message)$('#batch-selection-status').textContent=message;
+  }
+  async function selectModForDownload(input){
+    const key=input.dataset.selectMod;
+    if(preparingBatch||state.clearingDownloadFolder){renderBatchControls();return;}
+    if(!input.checked){selectedMods.delete(key);renderBatchControls();return;}
+    const mod=state.mods.find(mod=>modKey(mod)===key);if(!mod)return;
+    const checking=[...batchCandidates.values()].filter(candidate=>candidate.status==='checking').length;
+    if(selectedMods.size+checking>=100){toast('Select up to 100 mods per download batch.',true);renderBatchControls();return;}
+    const cached=batchCandidates.get(key);
+    if(cached?.eligible&&cached.status==='eligible'){selectedMods.add(key);renderBatchControls();return;}
+    const candidate={status:'checking',fingerprint:batchFingerprint(mod)};
+    batchCandidates.set(key,candidate);renderBatchControls();
+    try{
+      const result=await rpc('getBatchDownloadCandidates',{mods:[{gameDomain:modDomain(mod),modId:modId(mod)}]});
+      if(batchCandidates.get(key)!==candidate)return;
+      const checked=result?.candidates?.find(row=>modKey(row)===key);
+      if(!checked)throw new Error('The file list could not be checked. Try selecting this mod again.');
+      const status=checked.status||(checked.eligible?'eligible':'ineligible');
+      batchCandidates.set(key,{...checked,status,fingerprint:candidate.fingerprint});
+      if(checked.eligible&&status==='eligible')selectedMods.add(key);
+      else if(status==='failed')toast(checked.reason||'The file list could not be checked. Try again.',true);
+    }catch(error){
+      if(batchCandidates.get(key)!==candidate)return;
+      batchCandidates.set(key,{...candidate,status:'failed',reason:error.message});toast(error.message,true);
+    }finally{renderBatchControls();}
+  }
+  function clearModSelection(){
+    if(preparingBatch)return;
+    selectedMods.clear();for(const [key,candidate] of batchCandidates)if(candidate.status==='checking')batchCandidates.delete(key);
+    renderBatchControls();
+  }
+  async function downloadSelectedMods(){
+    if(preparingBatch||state.clearingDownloadFolder||!selectedMods.size||[...batchCandidates.values()].some(candidate=>candidate.status==='checking'))return;
+    const requested=new Set(selectedMods),mods=state.mods.filter(mod=>requested.has(modKey(mod))).map(mod=>({gameDomain:modDomain(mod),modId:modId(mod)}));
+    preparingBatch=true;renderBatchControls();
+    try{
+      const result=await rpc('startBatchDownload',{mods});consume(result);
+      const batch=result?.batch;if(!batch)throw new Error('The download batch could not be prepared. Try again.');
+      for(const candidate of batch.candidates||[]){
+        const key=modKey(candidate);if(!requested.has(key))continue;
+        const mod=state.mods.find(mod=>modKey(mod)===key);if(!mod)continue;
+        const status=candidate.status==='queued'?'alreadyQueued':candidate.status;
+        batchCandidates.set(key,{...candidate,status,fingerprint:batchFingerprint(mod)});
+        if(['queued','alreadyQueued','ineligible'].includes(candidate.status))selectedMods.delete(key);
+      }
+      const queued=Number(batch.queued)||0,skipped=Number(batch.skipped)||0,failed=Number(batch.failed)||0;
+      toast(`${queued} ${queued===1?'mod':'mods'} added to the download queue.${skipped?` ${skipped} skipped.`:''}${failed?` ${failed} could not be queued. Select Download selected to retry.`:''}`,failed>0);
+    }catch(error){toast(error.message,true);}
+    finally{preparingBatch=false;renderBatchControls();}
+  }
   function libraryMods(){return scopedLibrary;}
   const gameName = domain => gameNames.get(domain) || domain || 'Nexus Mods';
   const picture = mod => mod.pictureUrl ?? mod.picture_url ?? mod.imageUrl ?? '';
@@ -185,7 +277,8 @@
     $('#library-empty p').innerHTML=state.mods.length?'Add a game above or turn off <strong>Your games only</strong> to view all imported mods.':'Import your Nexus download history or add a mod link.';
     $('#library-empty').classList.toggle('hidden',!empty);$('#mods-table-wrap').classList.toggle('hidden',empty);$('#table-footer').classList.toggle('hidden',empty);
     $('#visible-count').textContent=`${mods.length} of ${scoped.length} ${scoped.length===1?'mod':'mods'}`;
-    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small></span></div></td><td><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date">${dateCell(downloaded(m))}</td><td class="table-date">${dateCell(updated(m))}</td><td><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="6" class="no-results">No mods match this view. Try another game or search.</td></tr>');
+    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td class="mod-select-cell"><input type="checkbox" data-select-mod="${esc(modKey(m))}" aria-label="Select ${esc(m.name)} for download" aria-describedby="batch-mod-${esc(modKey(m))}"></td><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small><small class="batch-mod-status hidden" id="batch-mod-${esc(modKey(m))}"></small></span></div></td><td><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date">${dateCell(downloaded(m))}</td><td class="table-date">${dateCell(updated(m))}</td><td><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="7" class="no-results">No mods match this view. Try another game or search.</td></tr>');
+    renderBatchControls();
   }
   function renderDownloads(){
     const downloads=[...state.downloads];
@@ -205,6 +298,7 @@
     clear.disabled=clearing||active||clear.classList.contains('busy');clear.setAttribute('aria-busy',String(clearing||clear.classList.contains('busy')));
     $('#download-folder').disabled=clearing;
     for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||(button.id==='download-selected'&&selectedFiles.size===0);
+    renderBatchControls();
   }
   function renderSettings(){
     const connected=!!(state.user || state.settings.hasApiKey);
@@ -363,6 +457,7 @@
   async function submitDialog(e){e.preventDefault();if(!modalConfig)return;const button=$('#dialog-submit');button.disabled=true;$('#dialog-error').classList.add('hidden');try{const close=await modalConfig.onSubmit();if(close!==false)$('#input-dialog').close();}catch(error){$('#dialog-error').textContent=error.message;$('#dialog-error').classList.remove('hidden');}finally{button.disabled=false;}}
 
   document.addEventListener('click',async e=>{
+    if(e.target.closest('[data-select-mod]'))return;
     const target=e.target.closest('button,a,tr[data-mod-key]');if(!target)return;
     if(target.matches('a')){e.preventDefault();if(target.classList.contains('brand'))navigate('library');else if(target.href)openUrl(target.href);return;}
     if(target.dataset.page){navigate(target.dataset.page);return;}
@@ -403,11 +498,13 @@
       'dialog-close':()=>$('#input-dialog').close(),'dialog-cancel':()=>$('#input-dialog').close(),
       'dialog-website-import':async()=>{const result=await run('importWebsite',{kind:'history',...(activeGame?{gameDomain:activeGame}:{})},target);if(result!==null){$('#input-dialog').close();toast('The Nexus history window is open. Sign in and use its import button.');}},
       'dialog-tracked-import':async()=>{const result=await run('importTracked',{},target);if(result!==null){$('#input-dialog').close();toast('Tracked mods imported into your local library.');}},
-      'download-selected':()=>downloadSelected(target)
+      'download-selected':()=>downloadSelected(target),
+      'download-selected-mods':downloadSelectedMods,'clear-mod-selection':clearModSelection
     };if(handlers[target.id])handlers[target.id]();
   });
   document.addEventListener('change',async e=>{
     const input=e.target;
+    if(input.dataset.selectMod){await selectModForDownload(input);return;}
     if(input.dataset.selectFile){const id=Number(input.dataset.selectFile);input.checked?selectedFiles.add(id):selectedFiles.delete(id);input.closest('.file-card').classList.toggle('selected',input.checked);$('#selected-files-count').textContent=selectedFiles.size;renderDownloadControls();}
     if(input.id==='dialog-file'&&input.files?.[0]){try{const file=input.files[0];if(file.size>30*1024*1024)throw new Error('Choose a history or backup file smaller than 30 MB.');$('#dialog-value').value=await file.text();}catch(error){toast(error.message,true);}}
   });

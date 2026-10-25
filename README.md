@@ -44,6 +44,10 @@ New mods downloaded outside NexusM need another history import or **Add mod**. U
 
 Downloads run one at a time. Cancelling a download or closing the app keeps its partial file. **Retry** gets fresh authorization and resumes when the server supports it. Existing completed archives are not overwritten.
 
+For mods with exactly one main file and no optional files, use the checkboxes in **My library**, then **Download selected** to queue up to 100 mods together. Checking a box verifies that mod's current files without opening its details. Mods with file choices explain why they cannot be selected; open their details to choose files. Selections stay when you search or switch games, and **Clear selection** removes them.
+
+The batch checks file choices again before queuing, skips files already queued, and keeps failed selections available for retry. Downloads follow the same Nexus authorization, free-account countdown, and sign-in steps as individual downloads.
+
 **Downloaded** flags record exact files downloaded through NexusM; they do not mean a mod is installed. Older website history may have a mod-level download date without a per-file flag.
 
 Select **Preview file contents** on any file card to browse its archive folders and filenames before downloading. The preview loads only when requested and keeps your selected files unchanged. Some archives have no preview available on Nexus.
@@ -120,6 +124,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryImport.p
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCleanup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-BatchDownload.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FilePreview.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1

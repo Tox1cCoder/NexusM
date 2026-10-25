@@ -10,6 +10,8 @@
   let folderClearRequest = null;
   let folderSaveRequest = null;
   let browseFolderResult = {cancelled:true};
+  let batchDownloadRequest = null;
+  const batchCandidateRequests = new Map();
   const requests = [];
   const previewRequests = new Map();
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
@@ -22,6 +24,11 @@
     expect(request&&previewRequests.has(String(request.id)),'No matching preview request is waiting.');
     previewRequests.delete(String(request.id));
     window.NexusM.receive(error?{id:request.id,ok:false,error}:{id:request.id,ok:true,result});
+  };
+  const replyCandidate = (request,candidate,error=null) => {
+    expect(request&&batchCandidateRequests.has(String(request.id)),'No batch file check is waiting.');
+    batchCandidateRequests.delete(String(request.id));
+    window.NexusM.receive(error?{id:request.id,ok:false,error}:{id:request.id,ok:true,result:{candidates:[candidate]}});
   };
   const fixture = {
     games:Array.from({length:9},(_,i)=>({id:i+1,domain:`game${i+1}`,name:`Test Game ${i+1}`})),
@@ -76,6 +83,8 @@
       bridge.postMessage=function(message){
         if(message.action==='getModDetails'){requests.push(message);queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:fakeDetails}));}
         else if(message.action==='getFileContents'){requests.push(message);previewRequests.set(String(message.id),message);}
+        else if(message.action==='getBatchDownloadCandidates'){requests.push(message);batchCandidateRequests.set(String(message.id),message);}
+        else if(message.action==='startBatchDownload'){requests.push(message);batchDownloadRequest=message;}
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
@@ -128,6 +137,77 @@
         expect($('#library-count').textContent==='3','Removed-game records should stay out of active-library counts.');
         expect(!$('#mods-body').innerText.includes('Preserved old-game history'),'Removed-game history should stay hidden while Your games only is enabled.');
         expect($('#your-games-only').getAttribute('aria-pressed')==='true','Your games only should default to enabled.');
+      });
+      await check('library checkboxes inspect only selected mods without opening details',async()=>{
+        const before=requests.filter(request=>request.action==='getBatchDownloadCandidates').length;
+        const detailsBefore=requests.filter(request=>request.action==='getModDetails').length;
+        const input=$('[data-select-mod="game1:1"]'),row=input.closest('tr');
+        expect(!before,'Rendering even a large library must not eagerly request file lists.');
+        input.focus();input.click();
+        const request=[...batchCandidateRequests.values()].pop();
+        expect(request.payload.mods.length===1&&request.payload.mods[0].modId===1,'Checking a box should inspect only that mod.');
+        expect(input.checked&&input.disabled&&input.getAttribute('aria-busy')==='true','An in-flight check should keep the checkbox checked and busy.');
+        expect($('#download-selected-mods').disabled,'Downloading must wait for the file check.');
+        expect(requests.filter(request=>request.action==='getModDetails').length===detailsBefore&&$('#detail-panel').classList.contains('hidden'),'Checking a box must not open mod details.');
+        replyCandidate(request,{gameDomain:'game1',modId:1,eligible:true,status:'eligible',fileId:101,name:'Only main archive'});await settle();
+        expect(input.checked&&!input.disabled&&!$('#download-selected-mods').disabled,'One main file with no optional files should become selected.');
+        expect($('#download-selected-mods').textContent==='Download selected (1)','The batch button must show the selected count.');
+        window.NexusM.setState({downloads:[...fixture.downloads,{id:'batch-progress',status:'downloading',bytes:10,total:100}]});
+        expect($('[data-select-mod="game1:1"]')===input&&input.closest('tr')===row&&input.checked,'Download progress must preserve row identity and selection.');
+        input.click();input.click();await settle();
+        expect(requests.filter(request=>request.action==='getBatchDownloadCandidates').length===before+1&&input.checked,'Reselecting a verified unchanged mod should reuse its file check.');
+        $('#clear-mod-selection').click();window.NexusM.setState(fixture);
+      });
+      await check('mods with file choices are disabled while failed file checks remain retryable',async()=>{
+        const choices=$('[data-select-mod="game1:2"]');choices.click();
+        replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:2,eligible:false,status:'ineligible',reason:'This mod has optional files. Open it to choose files.'});await settle();
+        expect(!choices.checked&&choices.disabled&&choices.closest('tr').textContent.includes('optional files'),'Optional files must leave the mod unselected and explain why.');
+        const retry=$('[data-select-mod="game2:3"]');retry.click();
+        replyCandidate([...batchCandidateRequests.values()].pop(),null,'Nexus is temporarily unavailable.');await settle();
+        expect(!retry.checked&&!retry.disabled,'A failed API call must allow another selection attempt.');
+        retry.click();replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game2',modId:3,eligible:true,status:'eligible',fileId:103,name:'Single patch'});await settle();
+        expect(retry.checked,'Retrying the file check should select an eligible mod.');
+        $('#clear-mod-selection').click();
+      });
+      await check('batch selections survive filters and queue once while partial failures remain selected',async()=>{
+        $('[data-select-mod="game1:1"]').click();$('[data-select-mod="game2:3"]').click();await settle();
+        expect($('#download-selected-mods').textContent==='Download selected (2)','Both verified mods should be selected.');
+        $('#mod-search').value='Alpha';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+        expect($('#batch-selection-status').textContent.includes('1 selected mod is hidden'),'The selection count must include mods hidden by search.');
+        window.NexusM.setState({clearingDownloadFolder:true});
+        expect($('#download-selected-mods').disabled&&$('[data-select-mod="game1:1"]').disabled,'Folder cleanup must disable library download controls.');
+        window.NexusM.setState({clearingDownloadFolder:false});
+        const before=requests.filter(request=>request.action==='startBatchDownload').length;
+        $('#download-selected-mods').click();$('#download-selected-mods').click();
+        expect(requests.filter(request=>request.action==='startBatchDownload').length===before+1&&batchDownloadRequest.payload.mods.length===2,'Repeated clicks should start only one batch containing hidden selections.');
+        window.NexusM.receive({id:batchDownloadRequest.id,ok:true,result:{state:{downloads:[...fixture.downloads,{id:'game1:1:101',gameDomain:'game1',modId:1,fileId:101,status:'waiting-authorization'}]},batch:{queued:1,skipped:0,failed:1,candidates:[{gameDomain:'game1',modId:1,fileId:101,eligible:true,status:'queued',reason:'Already in download queue.'},{gameDomain:'game2',modId:3,eligible:false,status:'failed',reason:'Temporary file lookup failure.'}]}}});batchDownloadRequest=null;await settle();
+        expect($('#download-selected-mods').textContent==='Download selected (1)'&&!$('#download-selected-mods').disabled,'Only the failed selection should remain ready for retry.');
+        $('#mod-search').value='';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+        expect(!$('[data-select-mod="game1:1"]').checked&&$('[data-select-mod="game2:3"]').checked,'Queued mods must clear while failed mods stay selected.');
+        $('#download-selected-mods').click();
+        expect(batchDownloadRequest.payload.mods.length===1&&batchDownloadRequest.payload.mods[0].modId===3,'Retry should submit only the failed mod.');
+        window.NexusM.receive({id:batchDownloadRequest.id,ok:true,result:{state:{downloads:fixture.downloads},batch:{queued:1,skipped:0,failed:0,candidates:[{gameDomain:'game2',modId:3,fileId:103,eligible:true,status:'queued'}]}}});batchDownloadRequest=null;await settle();
+        expect($('#download-selected-mods').disabled&&$('#download-selected-mods').textContent==='Download selected (0)','A completed batch should clear all queued selections.');
+        window.NexusM.setState(fixture);
+      });
+      await check('changed file choices on batch start clear the selection and explain why',async()=>{
+        const input=$('[data-select-mod="game1:1"]');input.click();
+        replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:1,eligible:true,status:'eligible',fileId:101});await settle();
+        $('#download-selected-mods').click();
+        window.NexusM.receive({id:batchDownloadRequest.id,ok:true,result:{state:{downloads:fixture.downloads},batch:{queued:0,skipped:1,failed:0,candidates:[{gameDomain:'game1',modId:1,eligible:false,status:'ineligible',reason:'This mod now has multiple main files. Open it to choose files.'}]}}});batchDownloadRequest=null;await settle();
+        expect(!input.checked&&input.disabled&&input.closest('tr').textContent.includes('multiple main files'),'Fresh validation should stop a changed mod from downloading the wrong file.');
+      });
+      await check('metadata changes and cancelled checks cannot restore stale batch selections',async()=>{
+        window.NexusM.setState({mods:fixture.mods.map(mod=>mod.modId===1?{...mod,version:'2.1'}:mod)});
+        let input=$('[data-select-mod="game1:1"]');expect(!input.disabled,'A new version should allow file eligibility to be checked again.');input.click();
+        const cancelled=[...batchCandidateRequests.values()].pop();$('#clear-mod-selection').click();
+        replyCandidate(cancelled,{gameDomain:'game1',modId:1,eligible:true,status:'eligible',fileId:201});await settle();
+        expect(!input.checked&&$('#download-selected-mods').disabled,'Clearing an in-flight selection must ignore its late response.');
+        input.click();const stale=[...batchCandidateRequests.values()].pop();
+        window.NexusM.setState({mods:fixture.mods.filter(mod=>mod.modId!==1)});
+        replyCandidate(stale,{gameDomain:'game1',modId:1,eligible:true,status:'eligible',fileId:201});await settle();
+        expect($('#download-selected-mods').disabled,'Removing a mod during its check must prevent a hidden stale selection.');
+        window.NexusM.setState(fixture);
       });
       await check('unrelated state updates preserve library rows, focus, and game controls',()=>{
         const row=$('#mods-body tr'),game=$('[data-select-game="game1"]'),account=$('#account button');
@@ -526,6 +606,9 @@
       if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderSaveRequest)window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'UI fixture ended.'});
+      if(batchDownloadRequest)window.NexusM.receive({id:batchDownloadRequest.id,ok:false,error:'UI fixture ended.'});
+      for(const request of batchCandidateRequests.values())window.NexusM.receive({id:request.id,ok:false,error:'UI fixture ended.'});
+      batchCandidateRequests.clear();$('#clear-mod-selection').click();
       for(const request of previewRequests.values())window.NexusM.receive({id:request.id,ok:false,error:'UI fixture ended.'});
       previewRequests.clear();
       window.NexusM.setState({clearingDownloadFolder:false});
