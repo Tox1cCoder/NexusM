@@ -10,11 +10,11 @@ using Microsoft.Win32;
 
 namespace NexusM
 {
-    internal sealed class Controller : IDisposable
+    internal sealed partial class Controller : IDisposable
     {
         internal readonly Storage Store;
         internal NexusApi Api;
-        internal bool HasActiveTransfers { get { return transfers.Count > 0 || clearingDownloadFolder; } }
+        internal bool HasActiveTransfers { get { return transfers.Count > 0 || clearingDownloadFolder || preparingBatchDownload; } }
         private DownloadService downloader;
         private readonly MainForm window;
         private bool initialized;
@@ -79,6 +79,8 @@ namespace NexusM
             if (action == "getModDetails") return await Details(Data.Str(p, "gameDomain"), Data.Num(p, "modId"));
             if (action == "getFileContents") { RequireApi(); return await Api.FileContentsAsync(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId"), lifetime.Token); }
             if (action == "startDownload") { await AuthorizeDownload(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId")); return Store.PublicState(); }
+            if (action == "getBatchDownloadCandidates") return await GetBatchDownloadCandidates(Data.Get(p, "mods"));
+            if (action == "startBatchDownload") return await StartBatchDownload(Data.Get(p, "mods"));
             if (action == "cancelDownload") {
                 string id = Data.Str(p, "id");
                 CancellationTokenSource cancel; if (transfers.TryGetValue(id, out cancel)) cancel.Cancel();
@@ -141,7 +143,7 @@ namespace NexusM
         }
         private void RequireIdleDownloads() {
             var finished = new HashSet<string>(new[] { "completed", "failed", "cancelled", "canceled", "interrupted" });
-            if (transfers.Count > 0 || pending.Count > 0 || Store.Downloads.Any(x => !finished.Contains(Data.Str(x, "status"))))
+            if (preparingBatchDownload || transfers.Count > 0 || pending.Count > 0 || Store.Downloads.Any(x => !finished.Contains(Data.Str(x, "status"))))
                 throw new InvalidOperationException("Finish or cancel pending downloads before clearing the download folder.");
         }
         internal object ClearDownloadFolder(Func<DownloadFolderPlan, bool> confirm = null, Action<string> delete = null) {
@@ -457,10 +459,7 @@ namespace NexusM
             var file = Data.List(Data.Get(detail, "files")).FirstOrDefault(x => Data.Num(x, "fileId") == fileId);
             if (file == null) throw new ArgumentException("This file is no longer listed by Nexus.");
             if (Data.Str(file, "category").Equals("ARCHIVED", StringComparison.OrdinalIgnoreCase) || Data.Str(file, "category").Equals("DELETED", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("This file is unavailable. Choose an active file or open its Nexus page.");
-            Store.Downloads.RemoveAll(x => Data.Str(x, "id") == id);
-            var queue = Data.Obj("id", id, "gameDomain", domain, "modId", modId, "fileId", fileId, "name", Data.Str(file, "name"), "status", "waiting-authorization", "authorizationMessage", "Preparing the Nexus free download...", "needsUser", false, "bytes", 0, "total", Data.Num(file, "size"));
-            Store.Downloads.Insert(0, queue); pending.Add(id); Store.Save(); Emit();
-            window.OpenAuthorization("https://www.nexusmods.com/" + domain + "/mods/" + modId + "?tab=files&file_id=" + fileId + "&nmm=1", id);
+            if (!QueueDownloadAuthorization(domain, modId, fileId, file, null)) throw new InvalidOperationException("This file is already being prepared or downloaded.");
         }
         internal async Task ReceiveNxm(string uri) {
             RequireFolderAvailable(); RequireApi(); var request = DownloadRequest.ParseNxm(uri, Folder); string id = request.Id;
