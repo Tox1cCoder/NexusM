@@ -47,6 +47,26 @@ namespace NexusM
 
     internal static class DownloadFolderCleanup
     {
+        // A single-archive action must never discover unrelated resume files.
+        // Require a complete saved fingerprint for these destructive actions.
+        internal static DownloadFolderPlan PrepareRecordedFile(string folder, IEnumerable<string> protectedPaths, object value)
+        {
+            string absolute = CanonicalFolder(folder);
+            string[] protectedFolders = (protectedPaths ?? Enumerable.Empty<string>()).Where(path => !String.IsNullOrWhiteSpace(path)).Select(CanonicalFolder).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            ValidateFolder(absolute, protectedFolders);
+            var snapshots = new Dictionary<string, DownloadFileSnapshot>(StringComparer.OrdinalIgnoreCase);
+            var record = value as IDictionary<string, object>;
+            if (Directory.Exists(absolute) && ValidCompletedRecord(record) && DirectPath(Text(record, "path"), absolute) &&
+                new[] { "fileLength", "fileCreatedUtcTicks", "fileModifiedUtcTicks" }.All(record.ContainsKey)) {
+                try {
+                    var file = new FileInfo(Path.GetFullPath(Text(record, "path")));
+                    if (RegularFile(file) && OwnedSnapshot(record, file)) snapshots[file.FullName] = new DownloadFileSnapshot(file);
+                } catch (IOException) { } catch (UnauthorizedAccessException) { } catch (ArgumentException) { } catch (System.Security.SecurityException) { }
+            }
+            return new DownloadFolderPlan(absolute, protectedFolders, Directory.Exists(absolute) ? new DirectoryInfo(absolute).CreationTimeUtc.Ticks : 0,
+                snapshots, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+        }
+
         internal static DownloadFolderPlan Prepare(string folder, IEnumerable<string> protectedPaths, IEnumerable<object> ownedFiles)
         {
             string absolute = CanonicalFolder(folder);

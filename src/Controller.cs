@@ -48,6 +48,7 @@ namespace NexusM
                     using (var candidate = new NexusApi(key)) { await candidate.ValidateAsync(); }
                     if (initializationTask != null) await initializationTask;
                     if (refreshTask != null) await refreshTask;
+                    if (downloadUpdatesTask != null) await downloadUpdatesTask;
                     Store.WriteKey(key); ResetApi(); initialized = false; initializationTask = null; await Connect();
                 }
                 if (folder != null) { RequireFolderAvailable(); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
@@ -77,12 +78,19 @@ namespace NexusM
                 Emit(); return Store.PublicState();
             }
             if (action == "getModDetails") return await Details(Data.Str(p, "gameDomain"), Data.Num(p, "modId"));
+            if (action == "checkDownloadUpdates") {
+                if (initializationTask != null && !initializationTask.IsCompleted) await initializationTask;
+                else await Refresh("");
+                return Store.PublicState();
+            }
+            if (action == "dismissDownloadUpdate" || action == "replaceDownloadUpdate" || action == "deleteDownloadUpdate") return await HandleDownloadedUpdate(action, p);
             if (action == "getFileContents") { RequireApi(); return await Api.FileContentsAsync(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId"), lifetime.Token); }
             if (action == "startDownload") { await AuthorizeDownload(Data.Str(p, "gameDomain"), Data.Num(p, "modId"), Data.Num(p, "fileId")); return Store.PublicState(); }
             if (action == "getBatchDownloadCandidates") return await GetBatchDownloadCandidates(Data.Get(p, "mods"));
             if (action == "startBatchDownload") return await StartBatchDownload(Data.Get(p, "mods"));
             if (action == "cancelDownload") {
                 string id = Data.Str(p, "id");
+                CancelDownloadReplacement(id);
                 CancellationTokenSource cancel; if (transfers.TryGetValue(id, out cancel)) cancel.Cancel();
                 var row = Store.Downloads.FirstOrDefault(x => Data.Str(x, "id") == id);
                 if (row != null && !transfers.ContainsKey(id)) { Data.Map(row)["status"] = "cancelled"; pending.Remove(id); window.CancelAuthorization(id); Store.Save(); Emit(); }
@@ -99,8 +107,10 @@ namespace NexusM
                         if (Data.Num(row, "modId") > 0 && Data.Num(row, "fileId") > 0 && Data.Num(Data.Get(fileHistory, fileKey), "downloadedAt") <= Data.Num(row, "downloadedAt")) fileHistory[fileKey] = new Dictionary<string, object>(Data.Map(row));
                     }
                     pending.Remove(id); Store.Downloads.Remove(row);
+                    CancelDownloadReplacement(id);
                 }
                 Store.State["fileDownloads"] = fileHistory;
+                PruneDownloadedUpdates();
                 foreach (var row in removable) window.CancelAuthorization(Data.Str(row, "id"));
                 Store.Save(); Emit(); return Store.PublicState();
             }
@@ -173,7 +183,7 @@ namespace NexusM
             }
             finally {
                 clearingDownloadFolder = false; Store.State["clearingDownloadFolder"] = false;
-                if (!disposed) { Store.Save(); Emit(); window.NextAuthorization(); }
+                if (!disposed) { PruneDownloadedUpdates(); Store.Save(); Emit(); window.NextAuthorization(); }
             }
         }
         private Task Initialize() {
@@ -326,7 +336,7 @@ namespace NexusM
             int done = 0, failed = 0;
             Progress(true, "mods", 0, selected.Count, "Checking current mod information...");
             try {
-                if (selected.Count == 0) { Store.State["notice"] = "Import your Nexus download history or add a mod URL first."; return; }
+                if (selected.Count == 0) { await CheckDownloadedUpdates(); Store.State["notice"] = "Import your Nexus download history or add a mod URL first." + DownloadUpdateCheckNotice; return; }
                 await ResolveModUids(selected);
                 var resolved = selected.Where(x => Data.Num(x, "uid") > 0).ToList();
                 done = failed = selected.Count - resolved.Count;
@@ -351,8 +361,9 @@ namespace NexusM
                     }
                 };
                 await Task.WhenAll(Enumerable.Range(0, Math.Min(4, Math.Max(1, (resolved.Count + NexusApi.ModBatchSize - 1) / NexusApi.ModBatchSize))).Select(x => worker()));
+                await CheckDownloadedUpdates();
                 Store.State["lastCheckedAt"] = Data.Now();
-                Store.State["notice"] = failed == 0 ? "Update check complete." : "Checked " + done + " mods; " + failed + " could not be reached. Their previous information was kept.";
+                Store.State["notice"] = (failed == 0 ? "Update check complete." : "Checked " + done + " mods; " + failed + " could not be reached. Their previous information was kept.") + DownloadUpdateCheckNotice;
                 Store.State["rateLimits"] = Api.RateLimits;
             }
             finally {
@@ -475,12 +486,14 @@ namespace NexusM
                 var final = Data.Map(result);
                 Store.Downloads.RemoveAll(x => Data.Str(x, "id") == id); Store.Downloads.Insert(0, final);
                 var fileHistory = Data.Map(Data.Get(Store.State, "fileDownloads")); fileHistory[id] = new Dictionary<string, object>(final); Store.State["fileDownloads"] = fileHistory;
+                CompleteDownloadReplacement(final);
+                PruneDownloadedUpdates();
                 var mod = FindMod(request.Domain, request.ModId);
                 if (mod == null) { try { await RefreshOne(request.Domain, request.ModId); mod = FindMod(request.Domain, request.ModId); } catch { } }
                 if (mod != null) { mod["lastDownloadedAt"] = Data.Now(); mod["needsReview"] = Data.Num(mod, "updatedAt") > Data.Now(); }
                 details.Remove(request.Domain + ":" + request.ModId); Store.Save(); Emit();
-            } catch (OperationCanceledException) { Store.Save(); Emit(); }
-            catch (Exception ex) { Store.State["notice"] = ex.Message; Store.Save(); Emit(); }
+            } catch (OperationCanceledException) { CancelDownloadReplacement(id); Store.Save(); Emit(); }
+            catch (Exception ex) { CancelDownloadReplacement(id); Store.State["notice"] = ex.Message; Store.Save(); Emit(); }
             finally { transfers.Remove(id); cancellation.Dispose(); window.NextAuthorization(); }
         }
         internal void AuthorizationStatus(string id, string message, bool needsUser) {

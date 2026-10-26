@@ -14,7 +14,7 @@
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pending = new Map();
   let sequence = 0;
-  let state = {games:[],mods:[],downloads:[],settings:{yourGamesOnly:true},user:null};
+  let state = {games:[],mods:[],downloads:[],downloadUpdates:[],settings:{yourGamesOnly:true},user:null};
   let activeGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
   let selectedFiles = new Set();
   const selectedMods = new Set(), batchCandidates = new Map();
@@ -23,6 +23,8 @@
   let lastFocus = null, lastNotice = null;
   let loadingLibrary = false, refreshPromise = null;
   let downloadFolderDraft = null;
+  let activeDownloadUpdate = null, downloadUpdateBusy = false, checkingDownloadUpdates = false;
+  const shownDownloadUpdates = new Set();
   const renderedHtml=new WeakMap();
   let librarySignature='',gamesSignature='',downloadsSignature='',settingsSignature='';
   let gameNames=new Map(),gameModCounts=new Map(),scopedLibrary=[];
@@ -37,7 +39,7 @@
     if (!bridge) return Promise.reject(new Error('Open NexusM.exe to connect to Nexus and use local files.'));
     const id = String(++sequence);
     return new Promise((resolve,reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error('This request is taking longer than expected. Please try again.')); }, ['refresh','initialize','importData','startBatchDownload'].includes(action) ? 180000 : 90000);
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error('This request is taking longer than expected. Please try again.')); }, ['refresh','initialize','importData','startBatchDownload','checkDownloadUpdates'].includes(action) ? 180000 : 90000);
       pending.set(id,{resolve,reject,timer});
       bridge.postMessage({id,action,payload});
     });
@@ -108,18 +110,19 @@
   }
   function consume(result) {
     const next=result?.state??result;
-    if(next&&['games','mods','downloads','settings','user','fileDownloads','lastCheckedAt','refreshProgress','clearingDownloadFolder','notice'].some(key=>Object.prototype.hasOwnProperty.call(next,key)))setState(next);
+    if(next&&['games','mods','downloads','downloadUpdates','settings','user','fileDownloads','lastCheckedAt','refreshProgress','clearingDownloadFolder','notice'].some(key=>Object.prototype.hasOwnProperty.call(next,key)))setState(next);
   }
   function setState(next) {
     if(!next || typeof next!=='object')return;
     state={...state,...next,settings:{...state.settings,...next.settings}};
     state.games=Array.isArray(state.games)?state.games:[];state.mods=Array.isArray(state.mods)?state.mods:[];state.downloads=Array.isArray(state.downloads)?state.downloads:[];
+    state.downloadUpdates=Array.isArray(state.downloadUpdates)?state.downloadUpdates:[];
     if(activeGame&&!state.games.some(g=>gameDomain(g)===activeGame))activeGame=null;
     const nextGames=JSON.stringify(state.games);
     const gamesChanged=nextGames!==gamesSignature;
     const nextLibrary=JSON.stringify([nextGames,state.settings.yourGamesOnly,state.mods.map(mod=>[modDomain(mod),modId(mod),mod.name,mod.version,mod.author,mod.uploaded_by,picture(mod),timestamp(updated(mod)),timestamp(downloaded(mod)),needsReview(mod)])]);
     const libraryChanged=nextLibrary!==librarySignature;
-    const nextDownloads=JSON.stringify(state.downloads),nextSettings=JSON.stringify([state.settings,state.user,state.clearingDownloadFolder]);
+    const nextDownloads=JSON.stringify([state.downloads,state.downloadUpdates]),nextSettings=JSON.stringify([state.settings,state.user,state.clearingDownloadFolder]);
     reconcileBatchSelection();
     if(libraryChanged){
       librarySignature=nextLibrary;gamesSignature=nextGames;
@@ -133,6 +136,7 @@
     renderCounts();renderRefresh();renderDownloadControls();refreshFileDownloadFlags();
     if(next.notice&&next.notice!==lastNotice)toast(next.notice);
     lastNotice=next.notice||null;
+    maybeShowDownloadUpdate();
   }
   const gameDomain = game => String(game.domain ?? game.domain_name ?? game.gameDomain ?? game.id ?? '');
   const modDomain = mod => String(mod.gameDomain ?? mod.game_domain_name ?? mod.gameDomainName ?? mod.domain ?? '');
@@ -287,9 +291,60 @@
       const status=d.status||'queued',done=status==='completed',failed=['failed','cancelled','canceled','interrupted'].includes(status),waiting=['waiting-authorization','awaiting-authorization','waiting','awaiting_authorization'].includes(status);
       const current=Number(d.bytes??d.downloadedBytes??d.receivedBytes??0),total=Number(d.total??d.totalBytes??0),percent=done?100:Math.max(0,Math.min(100,total?current/total*100:Number(d.progress||0)));
       const labels={queued:'Queued',authorizing:'Authorizing',retrying:'Resuming',downloading:'Downloading',completed:'Downloaded',failed:'Failed',cancelled:'Cancelled',canceled:'Cancelled',interrupted:'Interrupted'};
-      return `<article class="download-card"><div class="download-icon">${icon(done?'check':'download')}</div><div class="download-info"><h3>${esc(d.name??d.fileName??d.filename??'Mod archive')}</h3><div class="download-meta">${esc(d.fileName??d.filename??gameName(d.gameDomain))}${total?` · ${bytes(current)} / ${bytes(total)}`:''}${d.speed?` · ${bytes(d.speed)}/s`:''}${waiting&&d.authorizationMessage?`<br><span>${esc(d.authorizationMessage)}</span>`:''}${d.error?`<br><span class="download-error">${esc(d.error)}</span>`:''}</div>${status==='downloading'?`<div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${percent}%"></span></div>`:''}</div><span class="download-status ${done?'completed':''}">${esc(waiting?(d.needsUser?'Nexus needs attention':'Preparing download'):labels[status]||status)}</span><div class="download-actions">${done?`<button class="icon-button" data-download-folder="${esc(d.id)}" aria-label="Show file in folder" title="Show file in folder">${icon('folder')}</button>`:failed?`<button class="button small" data-retry-download="${esc(d.id)}">Retry</button>`:`${waiting?`<button class="button small" data-retry-download="${esc(d.id)}">Open Nexus</button>`:''}<button class="icon-button" data-cancel-download="${esc(d.id)}" aria-label="Cancel download" title="Cancel download">${icon('close')}</button>`}</div></article>`;
+      const update=done?state.downloadUpdates.find(update=>update.id===d.id):null;
+      return `<article class="download-card"><div class="download-icon">${icon(done?'check':'download')}</div><div class="download-info"><h3>${esc(d.name??d.fileName??d.filename??'Mod archive')}</h3><div class="download-meta">${esc(d.fileName??d.filename??gameName(d.gameDomain))}${total?` · ${bytes(current)} / ${bytes(total)}`:''}${d.speed?` · ${bytes(d.speed)}/s`:''}${waiting&&d.authorizationMessage?`<br><span>${esc(d.authorizationMessage)}</span>`:''}${d.error?`<br><span class="download-error">${esc(d.error)}</span>`:''}</div>${update?`<div class="download-update-note"><span class="badge update">Update available${update.version?`: ${esc(update.version)}`:''}</span><button class="text-button" data-review-download-update="${esc(d.id)}">Review update</button></div>`:''}${status==='downloading'?`<div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${percent}%"></span></div>`:''}</div><span class="download-status ${done?'completed':''}">${esc(waiting?(d.needsUser?'Nexus needs attention':'Preparing download'):labels[status]||status)}</span><div class="download-actions">${done?`<button class="icon-button" data-download-folder="${esc(d.id)}" aria-label="Show file in folder" title="Show file in folder">${icon('folder')}</button>`:failed?`<button class="button small" data-retry-download="${esc(d.id)}">Retry</button>`:`${waiting?`<button class="button small" data-retry-download="${esc(d.id)}">Open Nexus</button>`:''}<button class="icon-button" data-cancel-download="${esc(d.id)}" aria-label="Cancel download" title="Cancel download">${icon('close')}</button>`}</div></article>`;
     }).join(''):`<div class="empty-state"><div class="empty-symbol">${icon('download')}</div><h3>No downloads</h3><p>Open a mod in your library and choose the files you want.<br>Your downloads will appear here.</p><div class="empty-actions"><button class="button" data-page="library">Back to my library</button></div></div>`;
     renderDownloadControls();
+  }
+  function downloadUpdateKey(update){return JSON.stringify([update.id,update.updateKey||`file:${update.fileId}`,update.archiveKey||'']);}
+  function retainedDownloadUpdate(update){return state.downloads.some(download=>download.id===update.id&&download.status==='completed');}
+  function maybeShowDownloadUpdate(){
+    if(downloadUpdateBusy)return;
+    if(activeDownloadUpdate){
+      if(state.downloadUpdates.some(update=>downloadUpdateKey(update)===downloadUpdateKey(activeDownloadUpdate)&&retainedDownloadUpdate(update)))return;
+      activeDownloadUpdate=null;$('#download-update-dialog').close();
+    }
+    if(state.clearingDownloadFolder||detail||$('dialog[open]'))return;
+    const update=state.downloadUpdates.find(update=>retainedDownloadUpdate(update)&&!update.dismissed&&!shownDownloadUpdates.has(downloadUpdateKey(update)));
+    if(update)showDownloadUpdate(update);
+  }
+  function showDownloadUpdate(update){
+    if(downloadUpdateBusy||state.clearingDownloadFolder||$('dialog[open]'))return;
+    activeDownloadUpdate=update;shownDownloadUpdates.add(downloadUpdateKey(update));
+    $('#download-update-mod').textContent=update.modName||update.oldName||'A downloaded mod';
+    $('#download-update-summary').textContent=update.reviewOnly?`now reports version ${update.version||'not specified'}. Review its available files to choose the right download.`:'has a newer file linked by its author on Nexus.';
+    $('#download-update-files').innerHTML=`<div><span>Downloaded version ${esc(update.oldVersion||'not recorded')}</span><strong>${esc(update.oldName||'Downloaded archive')}</strong><code>${esc(update.oldFilename||update.oldPath)}</code></div>${update.reviewOnly?'':`<div><span>Available version ${esc(update.version||'not specified')}</span><strong>${esc(update.name||'Replacement archive')}</strong><code>${esc(update.filename||update.name)}</code></div>`}`;
+    $('#download-update-files').classList.toggle('review-only',!!update.reviewOnly);
+    $('#download-update-replace').textContent=update.reviewOnly?'Review files':'Replace';
+    $('#download-update-replace-note').textContent=update.reviewOnly?'Nexus has not identified one exact replacement for this archive. Review the file choices and author instructions before downloading.':'Replace downloads the newer file first, then permanently deletes this old archive only after the download succeeds. The new archive keeps its own filename.';
+    $('#download-update-path').textContent=update.oldPath||'';
+    $('#download-update-error').classList.add('hidden');
+    for(const button of $$('#download-update-dialog button'))button.disabled=false;
+    $('#download-update-dialog').showModal();$('#download-update-keep').focus();
+  }
+  async function actOnDownloadUpdate(action){
+    if(!activeDownloadUpdate||downloadUpdateBusy)return;
+    const update=activeDownloadUpdate;downloadUpdateBusy=true;
+    for(const button of $$('#download-update-dialog button'))button.disabled=true;
+    $('#download-update-error').classList.add('hidden');
+    const reviewFiles=action==='replaceDownloadUpdate'&&update.reviewOnly;
+    try{
+      consume(await rpc(reviewFiles?'dismissDownloadUpdate':action,{id:update.id,fileId:Number(update.fileId),updateKey:update.updateKey||`file:${update.fileId}`,archiveKey:update.archiveKey}));
+      activeDownloadUpdate=null;$('#download-update-dialog').close();
+      if(reviewFiles)await showMod(modKey(update));
+      else if(action==='replaceDownloadUpdate')toast('Replacement queued. The old archive stays until the new download finishes.');
+      else if(action==='deleteDownloadUpdate')toast('Old archive deleted. Your download history is kept.');
+    }catch(error){
+      if(action==='dismissDownloadUpdate'){activeDownloadUpdate=null;$('#download-update-dialog').close();toast(error.message,true);}
+      else{$('#download-update-error').textContent=error.message;$('#download-update-error').classList.remove('hidden');}
+    }
+    finally{downloadUpdateBusy=false;for(const button of $$('#download-update-dialog button'))button.disabled=false;maybeShowDownloadUpdate();}
+  }
+  async function checkDownloadedUpdates(){
+    if(checkingDownloadUpdates||refreshPromise||state.refreshProgress?.running||state.clearingDownloadFolder||!state.settings.hasApiKey||!state.downloads.some(download=>download.status==='completed'))return;
+    checkingDownloadUpdates=true;
+    try{consume(await rpc('checkDownloadUpdates'));}catch{/* Retry at the next check; saved updates remain available. */}
+    finally{checkingDownloadUpdates=false;}
   }
   function renderDownloadControls(){
     const clearing=state.clearingDownloadFolder===true;
@@ -342,7 +397,7 @@
     try{const result=await rpc('getModDetails',{gameDomain:modDomain(mod),modId:modId(mod)});if(token!==detailToken)return;detail={...detail,...result,mod:{...mod,...result?.mod},files:result?.files??[]};renderDetail();}
     catch(error){if(token===detailToken)$('#detail-content').innerHTML=`<div class="detail-tab-content"><h3>Couldn’t load this mod</h3><p class="subtle-empty">${esc(error.message)}</p><button class="button" data-detail-retry="${esc(key)}">Try again</button></div>`;}
   }
-  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;if(lastFocus?.isConnected)lastFocus.focus();}
+  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;if(lastFocus?.isConnected)lastFocus.focus();maybeShowDownloadUpdate();}
   function renderDetail(){
     if(!detail)return;const mod=detail.mod,img=imageUrl(picture(mod));
     $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body"></div>`;
@@ -475,6 +530,7 @@
     if(target.dataset.cancelDownload){run('cancelDownload',{id:target.dataset.cancelDownload},target);return;}
     if(target.dataset.retryDownload){run('retryDownload',{id:target.dataset.retryDownload},target);return;}
     if(target.dataset.downloadFolder){run('openFolder',{id:target.dataset.downloadFolder});return;}
+    if(target.dataset.reviewDownloadUpdate){const update=state.downloadUpdates.find(update=>update.id===target.dataset.reviewDownloadUpdate);if(update)showDownloadUpdate(update);return;}
     if(target.dataset.addResult){const result=await run('addGame',{query:target.dataset.addResult},target);if(result!==null)$('#input-dialog').close();return;}
     if(target.dataset.removeMod){const mod=detail?.mod;closeDetail();if(mod){consume(await run('removeMod',{gameDomain:modDomain(mod),modId:modId(mod)}));toast('Mod removed from your local library.');}return;}
     const handlers={
@@ -496,6 +552,8 @@
       'mark-reviewed-button':async()=>{if(!detail)return;const result=await run('markReviewed',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod)},target);if(result!==null){detail.mod={...detail.mod,needsReview:false};toast('Marked reviewed. Your download date stays the same.');target.innerHTML=`${icon('check')}Reviewed`;target.disabled=true;}},
       'export-button':()=>run('exportData',{},target),
       'dialog-close':()=>$('#input-dialog').close(),'dialog-cancel':()=>$('#input-dialog').close(),
+      'download-update-close':()=>actOnDownloadUpdate('dismissDownloadUpdate'),'download-update-keep':()=>actOnDownloadUpdate('dismissDownloadUpdate'),
+      'download-update-replace':()=>actOnDownloadUpdate('replaceDownloadUpdate'),'download-update-delete':()=>actOnDownloadUpdate('deleteDownloadUpdate'),
       'dialog-website-import':async()=>{const result=await run('importWebsite',{kind:'history',...(activeGame?{gameDomain:activeGame}:{})},target);if(result!==null){$('#input-dialog').close();toast('The Nexus history window is open. Sign in and use its import button.');}},
       'dialog-tracked-import':async()=>{const result=await run('importTracked',{},target);if(result!==null){$('#input-dialog').close();toast('Tracked mods imported into your local library.');}},
       'download-selected':()=>downloadSelected(target),
@@ -508,13 +566,16 @@
     if(input.dataset.selectFile){const id=Number(input.dataset.selectFile);input.checked?selectedFiles.add(id):selectedFiles.delete(id);input.closest('.file-card').classList.toggle('selected',input.checked);$('#selected-files-count').textContent=selectedFiles.size;renderDownloadControls();}
     if(input.id==='dialog-file'&&input.files?.[0]){try{const file=input.files[0];if(file.size>30*1024*1024)throw new Error('Choose a history or backup file smaller than 30 MB.');$('#dialog-value').value=await file.text();}catch(error){toast(error.message,true);}}
   });
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('#input-dialog').open)closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('#input-dialog').open){const focusable=$$('button:not([disabled]),input,a[href],select,textarea,summary', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('dialog[open]'))closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('dialog[open]')){const focusable=$$('button:not([disabled]),input,a[href],select,textarea,summary', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
   $('#mod-search').addEventListener('input',renderMods);$('#mod-sort').addEventListener('change',renderMods);$('#input-form').addEventListener('submit',submitDialog);$('#detail-scrim').addEventListener('click',closeDetail);
   $('#download-folder').addEventListener('input',e=>{downloadFolderDraft=e.target.value;});
+  $('#input-dialog').addEventListener('close',maybeShowDownloadUpdate);
+  $('#download-update-dialog').addEventListener('cancel',e=>{e.preventDefault();actOnDownloadUpdate('dismissDownloadUpdate');});
+  setInterval(checkDownloadedUpdates,30*60*1000);
   document.addEventListener('error',e=>{if(e.target.tagName==='IMG'){e.target.style.display='none';if(e.target.closest('.game-card'))e.target.parentElement.insertAdjacentHTML('afterbegin',`<span class="game-fallback">${icon('game')}<span>${esc(e.target.parentElement.title?.split(' · ')[0]||'Game')}</span></span>`);}},true);
 
   // Exposed for host-driven refreshes and local smoke tests, never contains the key.
-  window.NexusM={setState,receive,navigate,showMod,ready:false};
+  window.NexusM={setState,receive,navigate,showMod,checkDownloadedUpdates,ready:false};
   try{
     setState(state);
     window.NexusM.ready=true;interfaceReady=true;

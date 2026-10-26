@@ -85,7 +85,7 @@ jobs:
 
       - name: Run offline test suites
         run: |
-          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'BatchDownload', 'Refresh', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Startup', 'Version', 'Package', 'Release')) {
+          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'FolderCleanup', 'ModBatch', 'BatchDownload', 'Refresh', 'DownloadUpdates', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Startup', 'Version', 'Package', 'Release')) {
             & powershell -NoProfile -ExecutionPolicy Bypass -File ('.\tests\Test-' + $suite + '.ps1')
             if ($LASTEXITCODE -ne 0) { throw ($suite + ' tests failed.') }
           }

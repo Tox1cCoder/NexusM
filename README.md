@@ -44,6 +44,14 @@ New mods downloaded outside NexusM need another history import or **Add mod**. U
 
 Downloads run one at a time. Cancelling a download or closing the app keeps its partial file. **Retry** gets fresh authorization and resumes when the server supports it. Existing completed archives are not overwritten.
 
+While a completed archive remains in **Downloads**, NexusM checks for newer versions at startup, with **Check for updates**, and every 30 minutes while the app is open. A popup shows the old and new filenames and versions. Matching uses Nexus mod/file IDs and the author's file-update links, so changed archive names are supported.
+
+- **Replace** downloads the newer file through the normal Nexus flow, then permanently deletes the recorded old archive after the new download succeeds. Failed or cancelled downloads keep the old file.
+- **Delete old file** permanently deletes only that recorded archive and removes its Downloads entry. Its download history stays.
+- **Keep old file** dismisses that update's popup. Use **Review update** on its Downloads entry to reopen it; a later update can notify you again.
+
+If the author has not identified a single replacement, NexusM can notify you when the mod reports a changed version and offers **Review files** so you can choose. It does not guess which optional file or variant replaces your archive. Only archives that still match their saved file identity are eligible; renamed, moved, or externally changed files are left alone. Clearing the Downloads list stops these archive notifications.
+
 For mods with exactly one main file and no optional files, use the checkboxes in **My library**, then **Download selected** to queue up to 100 mods together. Checking a box verifies that mod's current files without opening its details. Mods with file choices explain why they cannot be selected; open their details to choose files. Selections stay when you search or switch games, and **Clear selection** removes them.
 
 The batch checks file choices again before queuing, skips files already queued, and keeps failed selections available for retry. Downloads follow the same Nexus authorization, free-account countdown, and sign-in steps as individual downloads.
@@ -126,6 +134,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCleanup.p
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-BatchDownload.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Refresh.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-DownloadUpdates.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FilePreview.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FreeDownloadFlow.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-UI.ps1

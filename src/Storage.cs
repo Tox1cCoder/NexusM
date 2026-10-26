@@ -51,6 +51,8 @@ namespace NexusM
             State["connected"] = false;
             State.Remove("refreshProgress");
             State.Remove("clearingDownloadFolder");
+            State.Remove("downloadUpdates");
+            State.Remove("downloadReplacements");
         }
         internal List<object> Games { get { return (List<object>)State["games"]; } }
         internal static string NormalizeDownloadFolder(object value) {

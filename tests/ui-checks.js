@@ -11,6 +11,8 @@
   let folderSaveRequest = null;
   let browseFolderResult = {cancelled:true};
   let batchDownloadRequest = null;
+  let downloadUpdateRequest = null;
+  let downloadUpdateCheckRequest = null;
   const batchCandidateRequests = new Map();
   const requests = [];
   const previewRequests = new Map();
@@ -39,6 +41,7 @@
       {gameDomain:'removedgame',modId:4,name:'Preserved old-game history',author:'Dave',version:'1.0',updatedAt:1792600000,lastDownloadedAt:1792100000,needsReview:true}
     ],
     downloads:[{id:'interrupted-fixture',gameDomain:'game1',modId:1,fileId:10,name:'Interrupted archive',status:'interrupted',error:'The app closed before this download finished.'}],
+    downloadUpdates:[],
     fileDownloads:{
       'game1:1:12':{gameDomain:'game1',modId:1,fileId:12,status:'completed',downloadedAt:1792480000},
       'game1:1:11':{gameDomain:'game1',modId:1,fileId:11,status:'failed',downloadedAt:1792480000},
@@ -85,6 +88,8 @@
         else if(message.action==='getFileContents'){requests.push(message);previewRequests.set(String(message.id),message);}
         else if(message.action==='getBatchDownloadCandidates'){requests.push(message);batchCandidateRequests.set(String(message.id),message);}
         else if(message.action==='startBatchDownload'){requests.push(message);batchDownloadRequest=message;}
+        else if(['dismissDownloadUpdate','replaceDownloadUpdate','deleteDownloadUpdate'].includes(message.action)){requests.push(message);downloadUpdateRequest=message;}
+        else if(message.action==='checkDownloadUpdates'){requests.push(message);downloadUpdateCheckRequest=message;}
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
@@ -586,6 +591,109 @@
         input.value=fixture.settings.downloadFolder;input.dispatchEvent(new Event('input',{bubbles:true}));$('#save-folder-button').click();
         window.NexusM.receive({id:folderSaveRequest.id,ok:true,result:{settings:fixture.settings}});folderSaveRequest=null;await settle();
       });
+      const updateArchive={id:'game1:1:40',gameDomain:'game1',modId:1,fileId:40,name:'Main archive',filename:'original-v1.zip',status:'completed',version:'1.0'};
+      const archiveUpdate={id:updateArchive.id,gameDomain:'game1',modId:1,modName:'Alpha overhaul',oldFileId:40,oldName:'Main archive',oldFilename:'original-v1.zip',oldVersion:'1.0',oldPath:'C:\\Downloads\\NexusM\\original-v1.zip',fileId:41,name:'New archive',filename:'renamed-v1.1-<img src=x onerror=alert(1)>.zip',version:'1.1',updateKey:'file:41',archiveKey:'archive-fixture-original',dismissed:false};
+      const answerUpdate=async(result,error=null)=>{
+        expect(downloadUpdateRequest,'An update action must be waiting.');
+        window.NexusM.receive(error?{id:downloadUpdateRequest.id,ok:false,error}:{id:downloadUpdateRequest.id,ok:true,result});
+        downloadUpdateRequest=null;await settle();
+      };
+      await check('download update popup waits for existing dialogs and safely shows renamed archives',async()=>{
+        $('#add-mod-button').click();expect($('#input-dialog').open,'The existing add dialog must be open.');
+        window.NexusM.setState({downloads:[updateArchive],downloadUpdates:[archiveUpdate]});
+        expect(!$('#download-update-dialog').open,'An update must wait for the existing dialog.');
+        $('#dialog-cancel').click();
+        for(let attempt=0;attempt<30&&!$('#download-update-dialog').open;attempt++)await new Promise(resolve=>setTimeout(resolve,10));
+        expect($('#download-update-dialog').open,'The pending update must appear when the existing dialog closes.');
+        expect($('#download-update-files').textContent.includes('original-v1.zip')&&$('#download-update-files').textContent.includes(archiveUpdate.filename),'The popup must show both different filenames verbatim.');
+        expect(!$('#download-update-files img'),'An archive filename must never become executable markup.');
+        expect($('#download-update-files').textContent.includes('1.0')&&$('#download-update-files').textContent.includes('1.1'),'Both versions must be visible.');
+        expect($('#download-update-path').textContent===archiveUpdate.oldPath,'The exact old path must be visible before deletion.');
+        expect($('#download-update-dialog').textContent.includes('bypasses the Recycle Bin'),'Permanent deletion must be explained before choosing an action.');
+        expect(document.activeElement===$('#download-update-keep'),'The safe keep choice should receive initial focus.');
+        const before=requests.length;$('#download-update-keep').click();$('#download-update-keep').click();
+        expect(requests.length===before+1&&downloadUpdateRequest.action==='dismissDownloadUpdate','Repeated clicks must send only one dismissal.');
+        expect(downloadUpdateRequest.payload.id===updateArchive.id&&downloadUpdateRequest.payload.fileId===41&&downloadUpdateRequest.payload.updateKey==='file:41'&&downloadUpdateRequest.payload.archiveKey===archiveUpdate.archiveKey,'Actions must identify the exact old archive and new file.');
+        await answerUpdate({downloadUpdates:[{...archiveUpdate,dismissed:true}]});
+        expect(!$('#download-update-dialog').open,'Keeping the old archive must close the popup.');
+        window.NexusM.setState({downloadUpdates:[archiveUpdate]});
+        expect(!$('#download-update-dialog').open,'Repeated state events must not reopen the same notification.');
+        expect($('[data-review-download-update]')&&$('#downloads-list').textContent.includes('Update available'),'The update must remain reviewable in Downloads.');
+      });
+      await check('replacement waits for a single explicit action and preserves retryable errors',async()=>{
+        $('[data-review-download-update]').click();expect($('#download-update-dialog').open,'Review update must reopen a kept update.');
+        const before=requests.length;$('#download-update-replace').click();$('#download-update-replace').click();
+        expect(requests.length===before+1&&downloadUpdateRequest.action==='replaceDownloadUpdate','Replace must send exactly one replacement action.');
+        expect($$('#download-update-dialog button').every(button=>button.disabled),'All popup actions must wait while a mutation is pending.');
+        expect($('#downloads-list').textContent.includes('original-v1.zip'),'The old download must remain while replacement authorization is pending.');
+        await answerUpdate(null,'Nexus is temporarily unavailable.');
+        expect($('#download-update-dialog').open&&!$('#download-update-replace').disabled&&!$('#download-update-error').classList.contains('hidden'),'A failed replacement must show an inline error and allow retry.');
+        $('#download-update-replace').click();
+        await answerUpdate({downloads:[updateArchive,{id:'game1:1:41',gameDomain:'game1',modId:1,fileId:41,name:'New archive',status:'waiting-authorization'}],downloadUpdates:[{...archiveUpdate,dismissed:true}]});
+        expect(!$('#download-update-dialog').open&&$('#downloads-list').textContent.includes('original-v1.zip'),'Queued replacement must keep the old archive visible.');
+        expect($('.toasts').textContent.includes('old archive stays until the new download finishes'),'Replacement feedback must explain that the old archive is retained until success.');
+      });
+      await check('deleting an old archive sends only its exact update action',async()=>{
+        $('[data-review-download-update]').click();$('#download-update-delete').click();
+        expect(downloadUpdateRequest.action==='deleteDownloadUpdate'&&downloadUpdateRequest.payload.id===updateArchive.id&&downloadUpdateRequest.payload.updateKey==='file:41','Delete must target only the recorded old archive.');
+        await answerUpdate({downloads:[],downloadUpdates:[]});
+        expect(!$('#download-update-dialog').open&&!$('[data-review-download-update]'),'Successful deletion must remove the stale update card.');
+      });
+      await check('new updates notify again while Escape and close persist the keep choice',async()=>{
+        const next={...archiveUpdate,fileId:42,version:'1.2',updateKey:'file:42'};
+        window.NexusM.setState({downloads:[updateArchive],downloadUpdates:[next]});
+        expect($('#download-update-dialog').open,'A newer target file must produce a new popup.');
+        $('#download-update-dialog').dispatchEvent(new Event('cancel',{cancelable:true}));
+        expect(downloadUpdateRequest.action==='dismissDownloadUpdate'&&downloadUpdateRequest.payload.fileId===42,'Escape must persist dismissal of this particular version.');
+        await answerUpdate({downloadUpdates:[{...next,dismissed:true}]});
+        $('[data-review-download-update]').click();$('#download-update-close').click();
+        expect(downloadUpdateRequest.action==='dismissDownloadUpdate','The close button must also preserve the keep choice.');
+        await answerUpdate({downloadUpdates:[{...next,dismissed:true}]});
+      });
+      await check('a failed saved dismissal never traps the user in the update popup',async()=>{
+        $('[data-review-download-update]').click();$('#download-update-close').click();
+        await answerUpdate(null,'The old archive is no longer present.');
+        expect(!$('#download-update-dialog').open,'The close choice must work locally when its archive changed or Nexus is unavailable.');
+        window.NexusM.setState({downloadUpdates:[{...archiveUpdate,fileId:42,updateKey:'file:42'}]});
+        expect(!$('#download-update-dialog').open,'A failed save must still suppress repeated popups in this session.');
+      });
+      await check('a changed archive identity refreshes displayed consent before deleting',async()=>{
+        const original={...archiveUpdate,fileId:43,updateKey:'file:43'};
+        window.NexusM.setState({downloads:[updateArchive],downloadUpdates:[original]});
+        expect($('#download-update-dialog').open&&$('#download-update-path').textContent===original.oldPath,'The original archive must be visible before its identity changes.');
+        const changed={...original,archiveKey:'archive-fixture-replaced',oldPath:'D:\\New Archives\\downloaded-again.zip',oldFilename:'downloaded-again.zip'};
+        window.NexusM.setState({downloadUpdates:[changed]});
+        expect($('#download-update-dialog').open&&$('#download-update-path').textContent===changed.oldPath,'Replacing a queue record must replace stale popup consent with the new archive path.');
+        $('#download-update-delete').click();
+        expect(downloadUpdateRequest.action==='deleteDownloadUpdate'&&downloadUpdateRequest.payload.archiveKey===changed.archiveKey,'Deletion must submit the exact archive identity that is currently displayed.');
+        await answerUpdate({downloads:[],downloadUpdates:[]});
+      });
+      await check('unlinked mod updates offer file review without assuming a replacement',async()=>{
+        const update={...archiveUpdate,fileId:0,version:'2.0',updateKey:'mod:1792600000',reviewOnly:true};
+        window.NexusM.setState({downloads:[updateArchive],downloadUpdates:[update]});
+        expect($('#download-update-dialog').open&&$('#download-update-replace').textContent==='Review files','An unlinked change must offer file review.');
+        expect($$('#download-update-files>div').length===1&&!$('#download-update-files').textContent.includes(archiveUpdate.filename),'An unknown replacement must not be presented as an exact file match.');
+        const replacements=requests.filter(request=>request.action==='replaceDownloadUpdate').length;
+        $('#download-update-replace').click();
+        expect(downloadUpdateRequest.action==='dismissDownloadUpdate'&&downloadUpdateRequest.payload.updateKey===update.updateKey,'Review files must dismiss only the current mod-change notice.');
+        await answerUpdate({downloadUpdates:[{...update,dismissed:true}]});
+        expect(!$('#download-update-dialog').open&&!$('#detail-panel').classList.contains('hidden'),'Review files must open the matching mod details.');
+        expect(requests.filter(request=>request.action==='replaceDownloadUpdate').length===replacements,'File review must not queue an assumed replacement.');
+        $('#detail-close').click();window.NexusM.setState({downloadUpdates:[],downloads:[]});
+      });
+      await check('periodic downloaded-update checks run once and wait for connection, refresh, and cleanup',async()=>{
+        window.NexusM.setState({downloads:[updateArchive],downloadUpdates:[],settings:{hasApiKey:true},refreshProgress:{running:false}});
+        const before=requests.filter(request=>request.action==='checkDownloadUpdates').length;
+        const first=window.NexusM.checkDownloadedUpdates(),second=window.NexusM.checkDownloadedUpdates();
+        expect(downloadUpdateCheckRequest&&requests.filter(request=>request.action==='checkDownloadUpdates').length===before+1,'An interval tick must check retained downloads only once while its request is pending.');
+        window.NexusM.receive({id:downloadUpdateCheckRequest.id,ok:true,result:{downloadUpdates:[{...archiveUpdate,dismissed:true}]}});downloadUpdateCheckRequest=null;await Promise.all([first,second]);
+        expect($('[data-review-download-update]'),'A periodic response must update the downloadable archive card.');
+        window.NexusM.setState({refreshProgress:{running:true}});await window.NexusM.checkDownloadedUpdates();
+        window.NexusM.setState({refreshProgress:{running:false},clearingDownloadFolder:true});await window.NexusM.checkDownloadedUpdates();
+        window.NexusM.setState({clearingDownloadFolder:false,settings:{hasApiKey:false}});await window.NexusM.checkDownloadedUpdates();
+        window.NexusM.setState({settings:{hasApiKey:true},downloads:[],downloadUpdates:[]});await window.NexusM.checkDownloadedUpdates();
+        expect(requests.filter(request=>request.action==='checkDownloadUpdates').length===before+1,'Periodic checks must wait for an active refresh/cleanup and require a key plus retained completed archives.');
+      });
       await check('empty Your games scope still exposes the filter and imported history',async()=>{
         window.NexusM.setState({games:[],mods:fixture.mods,downloads:[]});window.NexusM.navigate('library');
         expect(!$('#library-empty').classList.contains('hidden'),'Empty state is hidden.');
@@ -607,11 +715,13 @@
       if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderSaveRequest)window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'UI fixture ended.'});
       if(batchDownloadRequest)window.NexusM.receive({id:batchDownloadRequest.id,ok:false,error:'UI fixture ended.'});
+      if(downloadUpdateRequest)window.NexusM.receive({id:downloadUpdateRequest.id,ok:false,error:'UI fixture ended.'});
+      if(downloadUpdateCheckRequest)window.NexusM.receive({id:downloadUpdateCheckRequest.id,ok:false,error:'UI fixture ended.'});
       for(const request of batchCandidateRequests.values())window.NexusM.receive({id:request.id,ok:false,error:'UI fixture ended.'});
       batchCandidateRequests.clear();$('#clear-mod-selection').click();
       for(const request of previewRequests.values())window.NexusM.receive({id:request.id,ok:false,error:'UI fixture ended.'});
       previewRequests.clear();
-      window.NexusM.setState({clearingDownloadFolder:false});
+      window.NexusM.setState({clearingDownloadFolder:false,downloadUpdates:[]});
       window.NexusM.receive({event:'refreshProgress',data:{running:false}});
       bridge.postMessage=originalPost;
       if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();
