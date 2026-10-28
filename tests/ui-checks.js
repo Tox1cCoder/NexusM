@@ -262,6 +262,14 @@
         $('[data-select-game="game1"]').click();expect($$('#mods-body tr[data-mod-key]').length===2,'Game filter should show two mods.');
         $('[data-select-game=""]').click();
       });
+      await check('keyboard focus reveals each game removal control',()=>{
+        const game=$('[data-select-game="game1"]'),remove=game.closest('.game-card').querySelector('[data-remove-game]');
+        game.focus();
+        expect(getComputedStyle(remove).display!=='none','Focusing a game must reveal its removal control without hovering.');
+        remove.focus();
+        expect(document.activeElement===remove&&getComputedStyle(remove).display!=='none','Keyboard users must be able to reach and retain focus on game removal.');
+        game.focus();
+      });
       await check('Your games only toggles imported history and updates counts',async()=>{
         $('#your-games-only').click();await settle();
         expect(requests.some(r=>r.action==='saveSettings'&&r.payload.yourGamesOnly===false),'The filter preference was not saved.');
@@ -286,6 +294,32 @@
         window.NexusM.receive({event:'state',data:{games:fixture.games.filter(g=>g.domain!=='game1')}});
         expect($('#game-count').textContent==='8'&&$('#library-count').textContent==='1'&&$('#all-count').textContent==='1'&&$('#mods-title').textContent==='All mods','Removing the selected game should reset its scope and update all counts.');
         $('[data-filter="all"]').click();window.NexusM.setState(fixture);
+      });
+      await check('mod details support keyboard tabs, contain focus, and restore the library opener',async()=>{
+        const opener=$('[data-mod-key="game1:1"]');opener.focus();
+        const key=(element,value,extra={})=>{const event=new KeyboardEvent('keydown',{key:value,bubbles:true,cancelable:true,...extra});element.dispatchEvent(event);return event;};
+        try{
+          await window.NexusM.showMod('game1:1');
+          const close=$('#detail-close'),files=$('[data-detail-tab="files"]'),overview=$('[data-detail-tab="overview"]'),requirements=$('[data-detail-tab="requirements"]');
+          expect(document.activeElement===close,'Opening details should focus their close button.');
+          $('#mod-search').focus();expect(document.activeElement===close,'The library behind open details must reject focus.');
+          $('.sidebar .nav-item').focus();expect(document.activeElement===close,'Sidebar navigation must stay out of the open dialog.');
+          files.focus();key(files,'ArrowRight');
+          expect(document.activeElement===overview&&overview.getAttribute('aria-selected')==='true'&&$('#detail-tab-body').textContent.includes('Safe summary'),'Right arrow should focus and activate Overview.');
+          expect(files.tabIndex===-1&&overview.tabIndex===0&&$('#detail-tab-body').getAttribute('aria-labelledby')===overview.id,'Only the active tab should be in the tab order and name its panel.');
+          key(overview,'Home');expect(document.activeElement===files,'Home should activate the first tab.');
+          key(files,'ArrowLeft');expect(document.activeElement===requirements,'Left arrow on the first tab should wrap to Requirements.');
+          key(requirements,'Home');key(files,'End');expect(document.activeElement===requirements,'End should activate the last tab.');
+          key(requirements,'Home');
+          const first=$('#detail-external'),last=$('[data-download-file="12"]');
+          last.focus();const forward=key(last,'Tab');
+          expect(forward.defaultPrevented&&document.activeElement===first,'Tab at the end of details should wrap to their first control.');
+          last.disabled=true;const backward=key(first,'Tab',{shiftKey:true});
+          expect(backward.defaultPrevented&&document.activeElement===$('[data-preview-file="12"]'),'Reverse Tab should wrap past disabled controls.');
+          last.disabled=false;key(document.activeElement,'Escape');
+          expect($('#detail-panel').classList.contains('hidden')&&document.activeElement===opener,'Escape should close details and return focus to the library opener.');
+          expect(!$('main').inert&&!$('.sidebar').inert,'Closing details must restore background interaction.');
+        }finally{if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();}
       });
       await check('multiple main files and optional files stay separate',async()=>{
         await window.NexusM.showMod('game1:1');
@@ -526,6 +560,20 @@
           expect(content.querySelectorAll('br').length>=5,'Inline HTML must not collapse surrounding plain-text line breaks.');
           expect(content.querySelector('pre').textContent==='literal\n[b]still literal[/b]'&&!content.querySelector('pre strong'),'Everything in an HTML pre block must remain literal.');
           expect(!content.innerHTML.includes('</p><br><p>'),'HTML indentation between paragraphs must not add blank lines.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('wide author tables and code scroll within the details panel',async()=>{
+        const original=fakeDetails.mod.description;
+        try{
+          fakeDetails.mod.description=`<table><tr>${Array.from({length:48},(_,index)=>`<td>Column ${index}</td>`).join('')}</tr></table><pre><code>${'long_code_example_'.repeat(100)}</code></pre>`;
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const panel=$('#detail-panel'),table=$('#detail-tab-body table'),code=$('#detail-tab-body pre');
+          expect(panel.scrollWidth<=panel.clientWidth+1,'Wide author content must not overflow the whole details panel.');
+          for(const element of [table,code]){
+            expect(element.scrollWidth>element.clientWidth,'Wide tables and code examples need their own horizontal scroll area.');
+            element.focus();expect(document.activeElement===element,'Scrollable author content must be reachable by keyboard.');
+            element.scrollLeft=100;expect(element.scrollLeft>0,'Author content must scroll horizontally to expose the remaining text.');
+          }
         }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
       });
       await check('dictionary changelogs sort latest first and keep author note order',()=>{

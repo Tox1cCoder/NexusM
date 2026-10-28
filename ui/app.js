@@ -454,18 +454,28 @@
 
   async function showMod(key){
     const mod=state.mods.find(m=>modKey(m)===key);if(!mod)return;
-    lastFocus=document.activeElement;detail={mod,files:[],changelogs:{},requirements:[]};detailTab='files';selectedFiles.clear();filePreviews.clear();
+    if(!detail)lastFocus=document.activeElement;
+    detail={mod,files:[],changelogs:{},requirements:[]};detailTab='files';selectedFiles.clear();filePreviews.clear();
+    for(const background of $$('.sidebar,main'))background.inert=true;
     $('#detail-panel').classList.remove('hidden');$('#detail-scrim').classList.remove('hidden');document.body.style.overflow='hidden';$('#detail-close').focus();
     $('#detail-breadcrumb').textContent=gameName(modDomain(mod)).toUpperCase();$('#detail-content').innerHTML='<div class="loading"><span class="spinner"></span>Getting the latest mod details…</div>';
     const token=++detailToken;
     try{const result=await rpc('getModDetails',{gameDomain:modDomain(mod),modId:modId(mod)});if(token!==detailToken)return;detail={...detail,...result,mod:{...mod,...result?.mod},files:result?.files??[]};renderDetail();}
     catch(error){if(token===detailToken)$('#detail-content').innerHTML=`<div class="detail-tab-content"><h3>Couldn’t load this mod</h3><p class="subtle-empty">${esc(error.message)}</p><button class="button" data-detail-retry="${esc(key)}">Try again</button></div>`;}
   }
-  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;if(lastFocus?.isConnected)lastFocus.focus();maybeShowDownloadUpdate();}
+  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;for(const background of $$('.sidebar,main'))background.inert=false;if(lastFocus?.isConnected)lastFocus.focus();maybeShowDownloadUpdate();}
   function renderDetail(){
     if(!detail)return;const mod=detail.mod,img=imageUrl(picture(mod));
-    $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body"></div>`;
+    $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button id="detail-tab-${tab}" data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}" aria-controls="detail-tab-body" tabindex="${detailTab===tab?0:-1}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body" role="tabpanel" tabindex="0" aria-labelledby="detail-tab-${detailTab}"></div>`;
     renderDetailTab();
+  }
+  function activateDetailTab(tab,focus=false){
+    const target=$(`[data-detail-tab="${tab}"]`);if(!detail||!target)return;
+    detailTab=tab;
+    for(const button of $$('[data-detail-tab]')){
+      const active=button===target;button.classList.toggle('active',active);button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;
+    }
+    $('#detail-tab-body').setAttribute('aria-labelledby',target.id);renderDetailTab();if(focus)target.focus();
   }
   function categoryName(file){const category=file.category??file.categoryName??file.category_name??file.category_id??'Other files';const map={1:'Main files',2:'Updates',3:'Optional files',4:'Old versions',5:'Miscellaneous',6:'Old versions',MAIN:'Main files',OPTIONAL:'Optional files',UPDATE:'Updates',OLD_VERSION:'Old versions',MISCELLANEOUS:'Miscellaneous',ARCHIVED:'Old versions'};return map[category] || (/^main/i.test(category)?'Main files':/^optional/i.test(category)?'Optional files':String(category));}
   function fileDownloadedAt(file){
@@ -559,6 +569,7 @@
       const requirements=Array.isArray(detail.requirements)?detail.requirements:[];
       el.innerHTML=`<div class="details-note">${icon('info')}<span>${esc(detail.requirementsNotice||'Requirements may also be described in the overview, file notes, or pinned comments. Read the author’s instructions for the complete installation steps.')}</span></div>`+requirements.map(r=>`<article class="requirement-card"><div><strong>${esc(r.name??r.modName??'Requirement')}</strong>${r.notes?`<div class="rich-text">${richText(r.notes)}</div>`:''}</div>${imageUrl(r.url)?`<button class="icon-button" data-open-url="${esc(r.url)}" aria-label="Open requirement on Nexus">${icon('arrow')}</button>`:''}</article>`).join('')+(!requirements.length?'<p class="subtle-empty">No structured requirements are available. This doesn’t confirm the mod has no dependencies.</p>':'')+'<button class="button small" data-open-mod="true">Check requirements on Nexus '+icon('arrow')+'</button>';
     }
+    for(const scrollable of $$('.rich-text table,.rich-text pre',el))scrollable.tabIndex=0;
     renderDownloadControls();
   }
   async function downloadFile(id,button){if(!detail)return;const result=await run('startDownload',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod),fileId:Number(id)},button);if(result!==null)toast('Preparing your download…');}
@@ -599,7 +610,7 @@
     if(target.dataset.removeGame){const domain=target.dataset.removeGame;showDialog({title:'Remove this game?',description:`Remove ${gameName(domain)} from your games? Your downloaded archives stay in your folder.`,body:'<p class="dialog-tip">You can add the game again later.</p>',submit:'Remove game',onSubmit:async()=>{consume(await rpc('removeGame',{domain}));return true;}});return;}
     if(target.dataset.modKey){showMod(target.dataset.modKey);return;}
     if(target.dataset.filter){filter=target.dataset.filter;$$('[data-filter]').forEach(b=>b.classList.toggle('active',b===target));renderMods();return;}
-    if(target.dataset.detailTab){detailTab=target.dataset.detailTab;$$('[data-detail-tab]').forEach(b=>{b.classList.toggle('active',b===target);b.setAttribute('aria-selected',String(b===target));});renderDetailTab();return;}
+    if(target.dataset.detailTab){activateDetailTab(target.dataset.detailTab);return;}
     if(target.dataset.detailRetry){showMod(target.dataset.detailRetry);return;}
     if(target.hasAttribute('data-open-mod')){if(detail)openUrl(modUrl(detail.mod));return;}
     if(target.dataset.openUrl){openUrl(target.dataset.openUrl);return;}
@@ -645,7 +656,22 @@
     if(input.dataset.selectFile){const id=Number(input.dataset.selectFile);input.checked?selectedFiles.add(id):selectedFiles.delete(id);input.closest('.file-card').classList.toggle('selected',input.checked);$('#selected-files-count').textContent=selectedFiles.size;renderDownloadControls();}
     if(input.id==='dialog-file'&&input.files?.[0]){try{const file=input.files[0];if(file.size>30*1024*1024)throw new Error('Choose a history or backup file smaller than 30 MB.');$('#dialog-value').value=await file.text();}catch(error){toast(error.message,true);}}
   });
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&detail&&!$('dialog[open]'))closeDetail();if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);}if(e.key==='Tab'&&detail&&!$('dialog[open]')){const focusable=$$('button:not([disabled]),input,a[href],select,textarea,summary', $('#detail-panel')).filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable[focusable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}});
+  document.addEventListener('keydown',e=>{
+    if(e.key==='Escape'&&detail&&!$('dialog[open]')){e.preventDefault();closeDetail();return;}
+    if((e.key==='Enter'||e.key===' ')&&e.target.matches('tr[data-mod-key]')){e.preventDefault();showMod(e.target.dataset.modKey);return;}
+    const tab=e.target.closest('[data-detail-tab]');
+    if(tab&&['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){
+      const tabs=$$('[data-detail-tab]'),index=tabs.indexOf(tab);
+      const next=e.key==='Home'?0:e.key==='End'?tabs.length-1:(index+(e.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+      e.preventDefault();activateDetailTab(tabs[next].dataset.detailTab,true);return;
+    }
+    if(e.key==='Tab'&&detail&&!$('dialog[open]')){
+      const panel=$('#detail-panel'),focusable=$$('button,input,a[href],select,textarea,summary,[tabindex]',panel).filter(el=>!el.disabled&&el.tabIndex>=0&&el.getClientRects().length);
+      const first=focusable[0],last=focusable[focusable.length-1];
+      if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}
+      else if(!panel.contains(document.activeElement)||(!e.shiftKey&&document.activeElement===last)){e.preventDefault();first?.focus();}
+    }
+  });
   $('#mod-search').addEventListener('input',renderMods);$('#mod-sort').addEventListener('change',renderMods);$('#input-form').addEventListener('submit',submitDialog);$('#detail-scrim').addEventListener('click',closeDetail);
   $('#download-folder').addEventListener('input',e=>{downloadFolderDraft=e.target.value;});
   $('#input-dialog').addEventListener('close',maybeShowDownloadUpdate);
