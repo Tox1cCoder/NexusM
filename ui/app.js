@@ -17,6 +17,7 @@
   let state = {games:[],mods:[],downloads:[],downloadUpdates:[],settings:{yourGamesOnly:true},user:null};
   let activeGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
   let selectedFiles = new Set();
+  let fileBatch = null;
   const selectedMods = new Set(), batchCandidates = new Map();
   let preparingBatch = false;
   let filePreviews = new Map();
@@ -353,7 +354,9 @@
     const clear=$('#clear-download-folder-button');
     clear.disabled=clearing||active||clear.classList.contains('busy');clear.setAttribute('aria-busy',String(clearing||clear.classList.contains('busy')));
     $('#download-folder').disabled=clearing;
-    for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||(button.id==='download-selected'&&selectedFiles.size===0);
+    const selectedButton=$('#download-selected');
+    if(selectedButton){selectedButton.classList.toggle('busy',fileBatch!==null);selectedButton.setAttribute('aria-busy',String(fileBatch!==null));}
+    for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||(fileBatch!==null&&button.hasAttribute('data-download-file'))||(button.id==='download-selected'&&selectedFiles.size===0);
     renderBatchControls();
   }
   function renderSettings(){
@@ -499,7 +502,22 @@
     renderDownloadControls();
   }
   async function downloadFile(id,button){if(!detail)return;const result=await run('startDownload',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod),fileId:Number(id)},button);if(result!==null)toast('Preparing your download…');}
-  async function downloadSelected(button){const ids=[...selectedFiles];if(!ids.length)return;button.disabled=true;button.classList.add('busy');let added=0;try{for(const id of ids){if(!detail)break;const result=await run('startDownload',{gameDomain:modDomain(detail.mod),modId:modId(detail.mod),fileId:id});if(result!==null){added++;selectedFiles.delete(id);}}if(detail)renderDetailTab();if(added)toast(`Added ${added} ${added===1?'file':'files'} to the download queue.`);}finally{button.classList.remove('busy');renderDownloadControls();}}
+  async function downloadSelected(){
+    if(!detail||fileBatch||state.clearingDownloadFolder||!selectedFiles.size)return;
+    const batch={token:detailToken,gameDomain:modDomain(detail.mod),modId:modId(detail.mod),ids:[...selectedFiles]};
+    fileBatch=batch;renderDownloadControls();let added=0;
+    try{
+      // The accepted selection keeps its mod identity even if the reader closes or opens another mod.
+      for(const id of batch.ids){
+        const result=await run('startDownload',{gameDomain:batch.gameDomain,modId:batch.modId,fileId:id});
+        if(result!==null){added++;if(detail&&detailToken===batch.token)selectedFiles.delete(id);}
+      }
+      if(added)toast(`Added ${added} ${added===1?'file':'files'} to the download queue.`);
+    }finally{
+      fileBatch=null;
+      if(detail&&detailToken===batch.token)renderDetailTab();else renderDownloadControls();
+    }
+  }
 
   function showDialog(config){
     modalConfig=config;$('#dialog-title').textContent=config.title;$('#dialog-description').textContent=config.description||'';$('#dialog-body').innerHTML=config.body;$('#dialog-submit').textContent=config.submit||'Save';$('#dialog-submit').disabled=false;$('#dialog-error').classList.add('hidden');$('#input-dialog').showModal();

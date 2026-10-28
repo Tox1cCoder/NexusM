@@ -16,6 +16,8 @@
   const batchCandidateRequests = new Map();
   const requests = [];
   const previewRequests = new Map();
+  const fileDownloadRequests = new Map();
+  let deferFileDownloads = false;
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
   const check = async (name, test) => {
     try {await test();report.checks.push({test:name,passed:true});}
@@ -26,6 +28,11 @@
     expect(request&&previewRequests.has(String(request.id)),'No matching preview request is waiting.');
     previewRequests.delete(String(request.id));
     window.NexusM.receive(error?{id:request.id,ok:false,error}:{id:request.id,ok:true,result});
+  };
+  const replyFileDownload = (request,error=null) => {
+    expect(request&&fileDownloadRequests.has(String(request.id)),'No file download request is waiting.');
+    fileDownloadRequests.delete(String(request.id));
+    window.NexusM.receive(error?{id:request.id,ok:false,error}:{id:request.id,ok:true,result:{}});
   };
   const replyCandidate = (request,candidate,error=null) => {
     expect(request&&batchCandidateRequests.has(String(request.id)),'No batch file check is waiting.');
@@ -112,7 +119,8 @@
         }
         else if(message.action==='startDownload'){
           requests.push(message);
-          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{}}));
+          if(deferFileDownloads)fileDownloadRequests.set(String(message.id),message);
+          else queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{}}));
         }
         else if(message.action==='openUrl'){
           requests.push(message);
@@ -393,6 +401,57 @@
         expect(downloads.length===before+1&&downloads.at(-1).payload.fileId===10,'One click should submit exactly the selected file.');
         expect(!$('#input-dialog').open,'Starting a download should not open another app confirmation.');
         expect($('.toasts').textContent.includes('Preparing your download'),'Preparation status should be visible.');
+      });
+      await check('selected-file batches stay busy across tabs and retain failed selections',async()=>{
+        await window.NexusM.showMod('game1:1');
+        $('[data-select-file="10"]').click();$('[data-select-file="12"]').click();
+        const before=requests.filter(request=>request.action==='startDownload').length;
+        deferFileDownloads=true;
+        try{
+          $('#download-selected').click();
+          const first=[...fileDownloadRequests.values()][0];
+          expect(first?.payload.fileId===10,'A selected-file batch should start with its first chosen file.');
+          $('[data-detail-tab="overview"]').click();$('[data-detail-tab="files"]').click();
+          expect($('#download-selected').disabled&&$('#download-selected').getAttribute('aria-busy')==='true','Returning to Files must retain the in-flight batch state.');
+          expect($$('[data-download-file]').every(button=>button.disabled),'Individual file buttons must wait for the accepted batch to finish queueing.');
+          $('#download-selected').click();
+          expect(requests.filter(request=>request.action==='startDownload').length===before+1,'Switching tabs must not allow a duplicate selected-file batch.');
+          replyFileDownload(first);await settle();
+          const second=[...fileDownloadRequests.values()][0];
+          expect(second?.payload.fileId===12&&second.payload.modId===1,'The batch should queue the second chosen file exactly once.');
+          replyFileDownload(second,'Fixture download could not be queued.');await settle();
+          expect(!$('[data-select-file="10"]').checked&&$('[data-select-file="12"]').checked,'Only successfully queued selections should clear.');
+          expect(!$('#download-selected').disabled&&$('#download-selected').getAttribute('aria-busy')==='false','A failed selection must remain available for retry after the batch finishes.');
+        }finally{
+          deferFileDownloads=false;
+          for(const request of [...fileDownloadRequests.values()])replyFileDownload(request,'UI fixture cleanup.');
+          await settle();
+        }
+      });
+      await check('accepted file batches keep their original mod identity when another mod opens',async()=>{
+        await window.NexusM.showMod('game1:1');
+        $('[data-select-file="10"]').click();$('[data-select-file="12"]').click();
+        const originalMod=fakeDetails.mod;
+        deferFileDownloads=true;
+        try{
+          $('#download-selected').click();
+          const first=[...fileDownloadRequests.values()][0];
+          $('#detail-close').click();
+          fakeDetails.mod={...fixture.mods[1],description:originalMod.description};
+          await window.NexusM.showMod('game1:2');
+          const newSelection=$('[data-select-file="12"]');newSelection.click();
+          expect(newSelection.checked&&$('#download-selected').disabled,'A new detail session may select files while the accepted batch finishes.');
+          replyFileDownload(first);await settle();
+          const second=[...fileDownloadRequests.values()][0];
+          expect(second?.payload.gameDomain==='game1'&&second.payload.modId===1&&second.payload.fileId===12,'Remaining file IDs must use the original mod identity after opening another mod.');
+          replyFileDownload(second);await settle();
+          expect($('[data-select-file="12"]')===newSelection&&newSelection.checked&&$('#selected-files-count').textContent==='1','Old batch replies must preserve the new mod\'s checkbox and selection.');
+          expect(!$('#download-selected').disabled,'The new mod selection should become available when the prior batch finishes.');
+        }finally{
+          deferFileDownloads=false;fakeDetails.mod=originalMod;
+          for(const request of [...fileDownloadRequests.values()])replyFileDownload(request,'UI fixture cleanup.');
+          await settle();$('#detail-close').click();await window.NexusM.showMod('game1:1');
+        }
       });
       await check('author markup is preserved and executable markup removed',()=>{
         $('[data-detail-tab="overview"]').click();
