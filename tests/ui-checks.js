@@ -146,9 +146,15 @@
       await check('library checkboxes inspect only selected mods without opening details',async()=>{
         const before=requests.filter(request=>request.action==='getBatchDownloadCandidates').length;
         const detailsBefore=requests.filter(request=>request.action==='getModDetails').length;
-        const input=$('[data-select-mod="game1:1"]'),row=input.closest('tr');
+        const input=$('[data-select-mod="game1:1"]'),row=input.closest('tr'),target=input.closest('label');
         expect(!before,'Rendering even a large library must not eagerly request file lists.');
-        input.focus();input.click();
+        const bounds=target.getBoundingClientRect();
+        expect(bounds.width>=44&&bounds.height>=44,'Library selection needs a padded target at least 44px wide and tall.');
+        input.focus();
+        const space=new KeyboardEvent('keydown',{key:' ',bubbles:true,cancelable:true});input.dispatchEvent(space);
+        expect(!space.defaultPrevented&&document.activeElement===input,'Space on the checkbox must remain available for native keyboard activation.');
+        expect(requests.filter(request=>request.action==='getModDetails').length===detailsBefore,'Checkbox keyboard events must not open the row.');
+        target.click();
         const request=[...batchCandidateRequests.values()].pop();
         expect(request.payload.mods.length===1&&request.payload.mods[0].modId===1,'Checking a box should inspect only that mod.');
         expect(input.checked&&input.disabled&&input.getAttribute('aria-busy')==='true','An in-flight check should keep the checkbox checked and busy.');
@@ -159,7 +165,7 @@
         expect($('#download-selected-mods').textContent==='Download selected (1)','The batch button must show the selected count.');
         window.NexusM.setState({downloads:[...fixture.downloads,{id:'batch-progress',status:'downloading',bytes:10,total:100}]});
         expect($('[data-select-mod="game1:1"]')===input&&input.closest('tr')===row&&input.checked,'Download progress must preserve row identity and selection.');
-        input.click();input.click();await settle();
+        target.click();target.click();await settle();
         expect(requests.filter(request=>request.action==='getBatchDownloadCandidates').length===before+1&&input.checked,'Reselecting a verified unchanged mod should reuse its file check.');
         $('#clear-mod-selection').click();window.NexusM.setState(fixture);
       });
@@ -167,6 +173,10 @@
         const choices=$('[data-select-mod="game1:2"]');choices.click();
         replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:2,eligible:false,status:'ineligible',reason:'This mod has optional files. Open it to choose files.'});await settle();
         expect(!choices.checked&&choices.disabled&&choices.closest('tr').textContent.includes('optional files'),'Optional files must leave the mod unselected and explain why.');
+        const before=requests.length;
+        choices.closest('label').click();await settle();
+        expect(!choices.checked&&requests.length===before&&$('#detail-panel').classList.contains('hidden'),'Clicking the enlarged disabled target must neither select nor open the mod.');
+        expect(choices.closest('label').title.includes('optional files'),'The whole disabled target must explain why this mod cannot be selected.');
         const retry=$('[data-select-mod="game2:3"]');retry.click();
         replyCandidate([...batchCandidateRequests.values()].pop(),null,'Nexus is temporarily unavailable.');await settle();
         expect(!retry.checked&&!retry.disabled,'A failed API call must allow another selection attempt.');
@@ -275,8 +285,14 @@
         expect($$('.file-group')[0].querySelectorAll('.file-card').length===2,'Both main files must remain selectable.');
         expect($$('.file-group')[1].querySelectorAll('.file-card').length===1,'Optional file should have its own group.');
         expect($('#mark-reviewed-button'),'Mark reviewed control is missing.');
-        $('[data-select-file="10"]').click();$('[data-select-file="12"]').click();
+        const main=$('[data-select-file="10"]'),optional=$('[data-select-file="12"]');
+        expect(main.getBoundingClientRect().width>=20&&main.getBoundingClientRect().height>=20,'File checkboxes should be visually large enough to find.');
+        expect(main.closest('label').getBoundingClientRect().height>=44,'File selection headings need a comfortably sized click target.');
+        main.closest('label').querySelector('strong').click();optional.closest('label').click();
         expect($('#selected-files-count').textContent==='2'&&!$('#download-selected').disabled,'Multiple file selection did not update.');
+        optional.closest('label').click();
+        expect(!optional.checked&&$('#selected-files-count').textContent==='1','Clicking a file heading again must deselect exactly once.');
+        optional.click();
       });
       await check('downloaded flags identify exact main and optional files',()=>{
         expect($('[data-file-card="10"] .file-download-flag.downloaded')?.textContent==='Downloaded','The downloaded main file needs a visible check flag.');

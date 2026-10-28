@@ -177,6 +177,7 @@
       const status=$('.batch-mod-status',row);if(status.textContent!==message)status.textContent=message;status.classList.toggle('hidden',!message);
       const title=message||(candidate?.eligible?`Download ${candidate.name||'the main file'}`:'Check files and select this mod for download');
       if(input.title!==title)input.title=title;
+      const target=input.closest('label');if(target.title!==title)target.title=title;
       if(selectedMods.has(key))visibleSelected++;
     }
     const hidden=selectedMods.size-visibleSelected;
@@ -281,7 +282,7 @@
     $('#library-empty p').innerHTML=state.mods.length?'Add a game above or turn off <strong>Your games only</strong> to view all imported mods.':'Import your Nexus download history or add a mod link.';
     $('#library-empty').classList.toggle('hidden',!empty);$('#mods-table-wrap').classList.toggle('hidden',empty);$('#table-footer').classList.toggle('hidden',empty);
     $('#visible-count').textContent=`${mods.length} of ${scoped.length} ${scoped.length===1?'mod':'mods'}`;
-    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td class="mod-select-cell"><input type="checkbox" data-select-mod="${esc(modKey(m))}" aria-label="Select ${esc(m.name)} for download" aria-describedby="batch-mod-${esc(modKey(m))}"></td><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small><small class="batch-mod-status hidden" id="batch-mod-${esc(modKey(m))}"></small></span></div></td><td><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date">${dateCell(downloaded(m))}</td><td class="table-date">${dateCell(updated(m))}</td><td><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="7" class="no-results">No mods match this view. Try another game or search.</td></tr>');
+    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td class="mod-select-cell"><label class="mod-select-target"><input type="checkbox" data-select-mod="${esc(modKey(m))}" aria-label="Select ${esc(m.name)} for download" aria-describedby="batch-mod-${esc(modKey(m))}"></label></td><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small><small class="batch-mod-status hidden" id="batch-mod-${esc(modKey(m))}"></small></span></div></td><td><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date">${dateCell(downloaded(m))}</td><td class="table-date">${dateCell(updated(m))}</td><td><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="7" class="no-results">No mods match this view. Try another game or search.</td></tr>');
     renderBatchControls();
   }
   function renderDownloads(){
@@ -512,7 +513,7 @@
   async function submitDialog(e){e.preventDefault();if(!modalConfig)return;const button=$('#dialog-submit');button.disabled=true;$('#dialog-error').classList.add('hidden');try{const close=await modalConfig.onSubmit();if(close!==false)$('#input-dialog').close();}catch(error){$('#dialog-error').textContent=error.message;$('#dialog-error').classList.remove('hidden');}finally{button.disabled=false;}}
 
   document.addEventListener('click',async e=>{
-    if(e.target.closest('[data-select-mod]'))return;
+    if(e.target.closest('.mod-select-cell'))return;
     const target=e.target.closest('button,a,tr[data-mod-key]');if(!target)return;
     if(target.matches('a')){e.preventDefault();if(target.classList.contains('brand'))navigate('library');else if(target.href)openUrl(target.href);return;}
     if(target.dataset.page){navigate(target.dataset.page);return;}
