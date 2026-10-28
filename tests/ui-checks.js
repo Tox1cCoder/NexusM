@@ -462,6 +462,72 @@
         expect(body.querySelector('a[href^="https://www.nexusmods.com/"]'),'Safe author link should remain available.');
         expect(!window.__uiInjected,'Author script executed.');
       });
+      await check('Quest Trigger Fixes BBCode renders with or without surrounding HTML',async()=>{
+        const original=fakeDetails.mod.description;
+        const sample="[color=#ffff00][size=5][b]QUEST TRIGGER FIXES[/b][/size][/color]\n\nQuest Trigger Fixes is a gameplay mod that fixes quests still bugged in the latest patch, enabling you to play the game closer to how it was intended to work.\n\nUpdated releases include 'Compatibility Version' to avoid conflict with most popular mods. The full release is now known as the 'All-In-One' (AIO) version.\n\nSupports Update 2.5.\n\n[b]Quests[/b]";
+        try{
+          for(const description of [sample,`<div>${sample.replace(/\n/g,'<br>')}</div>`,`<div>${sample}</div>`]){
+            fakeDetails.mod.description=description;await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+            const content=$('#detail-tab-body .rich-text'),title=content.querySelector('strong');
+            expect(title?.textContent==='QUEST TRIGGER FIXES','The supplied title should be bold.');
+            expect(getComputedStyle(title).color==='rgb(255, 255, 0)','The supplied yellow title should retain its color.');
+            expect(parseFloat(getComputedStyle(title).fontSize)>parseFloat(getComputedStyle(content).fontSize),'The supplied size should enlarge the title.');
+            expect(!/\[\/?(?:color|size|b)[^\]]*\]/i.test(content.textContent),'Supported BBCode must not remain visible.');
+            expect(content.textContent.includes('Supports Update 2.5.')&&content.querySelectorAll('br').length>=6,'Body text and paragraph breaks must remain readable.');
+          }
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('nested BBCode keeps lists, quotes, spoilers and literal code examples readable',async()=>{
+        const original=fakeDetails.mod.description;
+        try{
+          fakeDetails.mod.description='[quote][b]Outer [b]inner[/b] end[/b][/quote][list=1][*]First[list][*]Nested[/list][*]Second[/list][spoiler=Install details]Hidden instructions[/spoiler][code][b]literal[/b]\n<unsafe> & text[/code]';
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const content=$('#detail-tab-body .rich-text');
+          expect(content.querySelector('blockquote strong strong')?.textContent==='inner'&&!content.querySelector('blockquote').textContent.includes('[/b]'),'Repeated nested tags should balance.');
+          expect(content.querySelectorAll('ol>li').length===2&&content.querySelector('ol>li>ul>li')?.textContent==='Nested','Numbered and nested lists should retain their hierarchy.');
+          const spoiler=content.querySelector('details');
+          expect(spoiler&&!spoiler.open&&spoiler.querySelector('summary').textContent==='Install details','Spoilers should use a labeled disclosure.');
+          spoiler.querySelector('summary').click();expect(spoiler.open,'Spoiler instructions should be reachable by clicking the disclosure.');
+          expect(content.querySelector('pre code')?.textContent==='[b]literal[/b]\n<unsafe> & text'&&!content.querySelector('pre br'),'Code samples should preserve literal tags and newlines.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('mixed author markup rejects unsafe URLs, styles and attribute injection',async()=>{
+        const original=fakeDetails.mod.description;
+        try{
+          fakeDetails.mod.description='<p>[b]Safe instructions[/b]</p>[color=red;position:fixed]Readable[/color][url=javascript:alert(1)]Bad link[/url][img]data:image/svg+xml,unsafe[/img][url="https://example.com/?a=1&b=2"]Safe link[/url][url]https://example.com/?x=1&y=2[/url][img]https://example.com/image.png" onerror="window.__uiInjected=true[/img]<span style="position:fixed;background:url(https://example.com);color:#ffff00" onclick="window.__uiInjected=true">Allowed color</span><code>[b]HTML code sample[/b]</code><script>window.__uiInjected=true</script>';
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const content=$('#detail-tab-body .rich-text');
+          expect(content.querySelector('p strong')?.textContent==='Safe instructions','BBCode in an HTML paragraph should render.');
+          expect(!content.querySelector('[onclick],[onerror],script,a[href^="javascript:"],img[src^="data:"]')&&!window.__uiInjected,'Unsafe markup or attributes reached the reader.');
+          expect([...content.querySelectorAll('[style]')].every(node=>!node.style.position&&!node.style.background),'Only supported text formatting may survive author styles.');
+          expect([...content.querySelectorAll('a[href]')].map(a=>a.href).includes('https://example.com/?a=1&b=2'),'Quoted links should preserve query parameters.');
+          expect(content.querySelector('code')?.textContent==='[b]HTML code sample[/b]','Existing HTML code samples must stay literal.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('mixed formatting works in file notes, changelogs and requirements',async()=>{
+        const file=fakeDetails.files[0].description,logs=fakeDetails.changelogs,requirements=fakeDetails.requirements;
+        try{
+          fakeDetails.files[0].description='<p>[b]File install notes[/b]</p>';
+          fakeDetails.changelogs={'3.0':['<div>[i]Release notes[/i]</div>']};
+          fakeDetails.requirements=[{name:'Framework',notes:'<p>[u]Install first[/u]</p>'}];
+          await window.NexusM.showMod('game1:1');
+          expect($('[data-file-card="10"] .rich-text strong')?.textContent==='File install notes','File notes should render mixed formatting.');
+          $('[data-detail-tab="changelog"]').click();expect($('.changelog-entry em')?.textContent==='Release notes','Changelog notes should render mixed formatting.');
+          $('[data-detail-tab="requirements"]').click();expect($('.requirement-card u')?.textContent==='Install first','Requirement notes should render mixed formatting.');
+        }finally{fakeDetails.files[0].description=file;fakeDetails.changelogs=logs;fakeDetails.requirements=requirements;await window.NexusM.showMod('game1:1');}
+      });
+      await check('encoded BBCode links and mixed raw line breaks preserve author content',async()=>{
+        const original=fakeDetails.mod.description;
+        try{
+          fakeDetails.mod.description='First line\nSecond line\n<img src="https://example.com/a.png">\nThird line\n[url=&quot;https://example.com/?a=1&amp;b=2&quot;]Guide[/url]\n[url=https://example.com/?a=1&amp;b=2]Other guide[/url]\n[url]https://example.com/?x=1&y=2[/url]<pre><code>literal</code>\n[b]still literal[/b]</pre><p>Paragraph</p>\n<p>Next paragraph</p>';
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const content=$('#detail-tab-body .rich-text'),links=[...content.querySelectorAll('a[href]')];
+          expect(links.length===3&&links[0].href==='https://example.com/?a=1&b=2'&&links[1].href===links[0].href&&links[2].href==='https://example.com/?x=1&y=2','URL parameters should be decoded once and preserve their query strings.');
+          expect(content.querySelectorAll('br').length>=5,'Inline HTML must not collapse surrounding plain-text line breaks.');
+          expect(content.querySelector('pre').textContent==='literal\n[b]still literal[/b]'&&!content.querySelector('pre strong'),'Everything in an HTML pre block must remain literal.');
+          expect(!content.innerHTML.includes('</p><br><p>'),'HTML indentation between paragraphs must not add blank lines.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
       await check('dictionary changelogs sort latest first and keep author note order',()=>{
         $('[data-detail-tab="changelog"]').click();
         const versions=$$('.changelog-entry h3').map(el=>el.textContent.replace(/^Version /,''));

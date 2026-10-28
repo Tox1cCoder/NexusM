@@ -368,22 +368,82 @@
     renderDownloadControls();
   }
 
-  // Convert common Nexus BBCode, then allow only harmless markup and web links.
+  // Nexus descriptions can mix HTML and BBCode. Parse both, then rebuild only
+  // readable markup; author-supplied attributes never go straight into the UI.
   function richText(source){
     if(!source)return '';
-    let text=String(source);
-    const htmlLike=/<\/?(?:p|div|br|ul|li|strong|b|img|a|span|h[1-6])\b/i.test(text);
-    if(!htmlLike){
-      text=esc(text).replace(/\[b\]([\s\S]*?)\[\/b\]/gi,'<strong>$1</strong>').replace(/\[i\]([\s\S]*?)\[\/i\]/gi,'<em>$1</em>').replace(/\[u\]([\s\S]*?)\[\/u\]/gi,'<u>$1</u>').replace(/\[s\]([\s\S]*?)\[\/s\]/gi,'<s>$1</s>').replace(/\[url=(?:&quot;)?([^\]]*?)(?:&quot;)?\]([\s\S]*?)\[\/url\]/gi,'<a href="$1">$2</a>').replace(/\[url\]([^\[]*)\[\/url\]/gi,'<a href="$1">$1</a>').replace(/\[img\]([^\[]*)\[\/img\]/gi,'<img src="$1" alt="Mod image">').replace(/\[quote(?:=[^\]]*)?\]([\s\S]*?)\[\/quote\]/gi,'<blockquote>$1</blockquote>').replace(/\[list(?:=1)?\]([\s\S]*?)\[\/list\]/gi,(_,body)=>`<ul>${body.split(/\[\*\]/).filter(x=>x.trim()).map(x=>`<li>${x}</li>`).join('')}</ul>`).replace(/\[size=[^\]]*\]([\s\S]*?)\[\/size\]/gi,'$1').replace(/\[color=[^\]]*\]([\s\S]*?)\[\/color\]/gi,'$1').replace(/\[center\]([\s\S]*?)\[\/center\]/gi,'<p>$1</p>').replace(/\[spoiler(?:=[^\]]*)?\]([\s\S]*?)\[\/spoiler\]/gi,'<blockquote>$1</blockquote>').replace(/\r?\n/g,'<br>');
+    const text=String(source).replace(/\r\n?/g,'\n');
+    const htmlLike=/<\/?(?:p|div|br|ul|ol|li|strong|b|em|i|u|s|img|a|span|h[1-6]|table|blockquote|pre|code|script|iframe)\b/i.test(text);
+    const root={tag:'',children:[]},stack=[root];
+    // HTML tokens are opaque here, so BBCode-looking attribute values and code
+    // examples are left intact for the sanitizer below.
+    const tokens=/<pre\b[^>]*>[\s\S]*?<\/pre\s*>|<code\b[^>]*>[\s\S]*?<\/code\s*>|<!--[\s\S]*?-->|<(?:[^<>"']|"[^"]*"|'[^']*')+>|\[code(?:=[^\]\n]*)?\]([\s\S]*?)\[\/code\]|\[(\/)?(b|i|u|s|strike|url|img|quote|list|size|color|font|center|left|right|spoiler|\*)(?:=([^\]\n]*))?\]/gi;
+    const append=value=>stack[stack.length-1].children.push(value);
+    const unquote=value=>{
+      const decoded=document.createElement('textarea');decoded.innerHTML=String(value??'').replace(/</g,'&lt;');
+      return decoded.value.trim().replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/,(_,double,single)=>double??single);
+    };
+    const sizes=['0.9em','1em','1.1em','1.25em','1.5em','1.75em','2em'];
+    const safeColor=value=>/^(?:#[0-9a-f]{3,8}|[a-z]{1,24}|rgba?\([\d.,%\s]{1,60}\))$/i.test(value)&&CSS.supports('color',value)?value:'';
+    const raw=value=>htmlLike?value:esc(value);
+    let cursor=0,match;
+    while((match=tokens.exec(text))){
+      append(raw(text.slice(cursor,match.index)));cursor=tokens.lastIndex;
+      if(match[0][0]==='<'){append({tag:'html',html:raw(match[0])});continue;}
+      if(match[1]!==undefined){append({tag:'code',children:[esc(match[1])]});continue;}
+      const closing=!!match[2],tag=match[3].toLowerCase();
+      if(tag==='*'){
+        const list=stack.map(node=>node.tag).lastIndexOf('list');
+        if(list<0){append('• ');continue;}
+        stack.length=list+1;const item={tag:'li',children:[]};append(item);stack.push(item);continue;
+      }
+      if(closing){
+        const index=stack.map(node=>node.tag).lastIndexOf(tag);
+        if(index>0)stack.length=index;
+        continue;
+      }
+      const node={tag,arg:unquote(match[4]),children:[]};append(node);stack.push(node);
     }
-    const parsed=new DOMParser().parseFromString(text,'text/html');
-    const allowed=new Set(['P','BR','STRONG','B','EM','I','U','S','UL','OL','LI','H1','H2','H3','H4','DIV','SPAN','IMG','A','HR','TABLE','THEAD','TBODY','TR','TD','TH','BLOCKQUOTE','CODE','PRE']);
+    append(raw(text.slice(cursor)));
+    function render(node,inCode=false){
+      if(typeof node==='string')return inCode?node:node.replace(/\n/g,'<br>');
+      if(node.tag==='html')return node.html;
+      const body=node.children.map((child,index)=>{
+        // Ignore HTML indentation beside block elements while retaining authored
+        // line breaks in plain text and mixed inline formatting.
+        if(typeof child==='string'&&/^\s*\n\s*$/.test(child)&&[node.children[index-1],node.children[index+1]].some(sibling=>sibling?.tag==='html'&&/^<\/?(?:p|div|ul|ol|li|h[1-6]|table|tr|td|th|blockquote|pre)\b/i.test(sibling.html)))return '';
+        return render(child,inCode||node.tag==='code');
+      }).join('');
+      const tags={b:'strong',i:'em',u:'u',s:'s',strike:'s',quote:'blockquote',li:'li'};
+      if(tags[node.tag])return `<${tags[node.tag]}>${body}</${tags[node.tag]}>`;
+      if(node.tag==='code')return `<pre><code>${body}</code></pre>`;
+      if(node.tag==='list')return `<${node.arg?'ol':'ul'}>${body}</${node.arg?'ol':'ul'}>`;
+      if(node.tag==='spoiler')return `<details><summary>${esc(node.arg||'Show spoiler')}</summary>${body}</details>`;
+      if(node.tag==='url'||node.tag==='img'){
+        const value=node.arg||new DOMParser().parseFromString(node.children.filter(child=>typeof child==='string').join(''),'text/html').body.textContent.trim();
+        return node.tag==='url'?`<a href="${esc(value)}">${body}</a>`:`<img src="${esc(value)}" alt="Mod image">`;
+      }
+      if(node.tag==='size'){
+        const size=sizes[Number(node.arg)-1];return size?`<span style="font-size:${size}">${body}</span>`:body;
+      }
+      if(node.tag==='color'){const color=safeColor(node.arg);return color?`<span style="color:${color}">${body}</span>`:body;}
+      if(['left','center','right'].includes(node.tag))return `<div style="text-align:${node.tag}">${body}</div>`;
+      return body;
+    }
+    const parsed=new DOMParser().parseFromString(render(root),'text/html');
+    const allowed=new Set(['P','BR','STRONG','B','EM','I','U','S','UL','OL','LI','H1','H2','H3','H4','H5','H6','DIV','SPAN','IMG','A','HR','TABLE','THEAD','TBODY','TR','TD','TH','BLOCKQUOTE','CODE','PRE','DETAILS','SUMMARY']);
     const blocked=new Set(['SCRIPT','STYLE','IFRAME','OBJECT','EMBED','FORM','INPUT','BUTTON','TEXTAREA','SELECT','SVG','MATH','LINK','META','BASE']);
     function clean(node){
       if(node.nodeType===Node.TEXT_NODE)return document.createTextNode(node.textContent);
       if(node.nodeType!==Node.ELEMENT_NODE)return document.createTextNode('');
       if(blocked.has(node.tagName))return document.createTextNode('');
       const out=allowed.has(node.tagName)?document.createElement(node.tagName.toLowerCase()):document.createDocumentFragment();
+      if(['SPAN','DIV','P'].includes(node.tagName)){
+        const color=safeColor(node.style.color),size=node.style.fontSize,align=node.style.textAlign;
+        if(color)out.style.color=color;
+        if(sizes.includes(size))out.style.fontSize=size;
+        if(['left','center','right'].includes(align))out.style.textAlign=align;
+      }
       if(node.tagName==='A'){const url=imageUrl(node.getAttribute('href'));if(url){out.setAttribute('href',url);out.setAttribute('data-external','true');}}
       if(node.tagName==='IMG'){const url=imageUrl(node.getAttribute('src'));if(!url)return document.createTextNode('');out.setAttribute('src',url);out.setAttribute('alt',node.getAttribute('alt')||'Mod image');out.setAttribute('loading','lazy');out.setAttribute('referrerpolicy','no-referrer');}
       for(const child of node.childNodes)out.append(clean(child));
