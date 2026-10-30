@@ -130,15 +130,23 @@ namespace NexusM
         private bool QueueDownloadAuthorization(string domain, long modId, long fileId, object file, Action<string, string> authorize) {
             RequireFolderAvailable(); lifetime.Token.ThrowIfCancellationRequested();
             string id = domain + ":" + modId + ":" + fileId;
+            CheckRetryWindow(Store.Downloads.FirstOrDefault(row => Data.Str(row, "id") == id));
             if (DownloadAuthorizationPending(id)) return false;
-            Store.Downloads.RemoveAll(row => Data.Str(row, "id") == id);
-            var queue = Data.Obj("id", id, "gameDomain", domain, "modId", modId, "fileId", fileId, "name", Data.Str(file, "name"), "status", "waiting-authorization", "authorizationMessage", "Preparing the Nexus free download...", "needsUser", false, "bytes", 0, "total", Data.Num(file, "size"));
-            Store.Downloads.Insert(0, queue); pending.Add(id); Store.Save(); Emit();
+            object previous = Store.Downloads.FirstOrDefault(row => Data.Str(row, "id") == id); int previousIndex = previous == null ? 0 : Store.Downloads.IndexOf(previous);
+            var queue = previous == null ? new Dictionary<string, object>() : new Dictionary<string, object>(Data.Map(previous));
+            long order = NextQueueOrder();
+            queue["id"] = id; queue["gameDomain"] = domain; queue["modId"] = modId; queue["fileId"] = fileId;
+            queue["name"] = Data.Str(file, "name"); queue["status"] = "waiting-authorization"; queue["authorizationMessage"] = "Preparing the Nexus free download..."; queue["needsUser"] = false;
+            queue["total"] = Data.Num(file, "size"); queue["folder"] = Data.Str(previous, "status") == "completed" ? Folder : Data.Get(queue, "folder") ?? Folder;
+            queue["queuedAt"] = Data.Now(); queue["queueOrder"] = order; queue["resumeOnStartup"] = true; queue["speed"] = 0L; queue["retryAt"] = 0L;
+            queue["attempt"] = 0L; queue["error"] = ""; queue["errorCode"] = "";
+            QueueEvent(queue, "queued", "Added to the saved queue. Waiting for fresh Nexus authorization.");
+            PersistQueueAdmission(queue, previous, previousIndex); pending.Add(id); Emit();
             try {
                 if (authorize != null) authorize("https://www.nexusmods.com/" + domain + "/mods/" + modId + "?tab=files&file_id=" + fileId + "&nmm=1", id);
                 else window.OpenAuthorization("https://www.nexusmods.com/" + domain + "/mods/" + modId + "?tab=files&file_id=" + fileId + "&nmm=1", id);
             }
-            catch (Exception error) { pending.Remove(id); queue["status"] = "failed"; queue["error"] = error.Message; Store.Save(); Emit(); throw; }
+            catch (Exception error) { pending.Remove(id); queue["status"] = "failed"; queue["resumeOnStartup"] = false; queue["error"] = QueueMessage(error.Message); queue["errorCode"] = "authorization_failed"; QueueEvent(queue, "authorization_failed", error.Message); Store.Save(); Emit(); throw; }
             return true;
         }
     }

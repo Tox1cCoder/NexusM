@@ -169,25 +169,48 @@ namespace NexusM
             Uri uri; if (!Uri.TryCreate(input, UriKind.Absolute, out uri) || (uri.Scheme != "https" && uri.Scheme != "http") || !String.IsNullOrEmpty(uri.UserInfo)) return;
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
         }
-        internal void OpenAuthorization(string url, string id) { if (authorizationBrowser != null && currentAuthorizationId == id) { authorizationBrowser.Reveal("Continue the selected download on Nexus."); authorizationBrowser.Activate(); return; } authorizations.Enqueue(new[] { url, id }); NextAuthorization(); }
-        internal void CancelAuthorization(string id) { if (authorizationBrowser != null && currentAuthorizationId == id) authorizationBrowser.Close(); }
+        internal void OpenAuthorization(string url, string id) {
+            if (closing) return;
+            if (authorizationBrowser != null && currentAuthorizationId == id) { authorizationBrowser.Reveal("Continue the selected download on Nexus."); authorizationBrowser.Activate(); return; }
+            foreach (var queued in authorizations) if (queued[1] == id) return;
+            authorizations.Enqueue(new[] { url, id }); NextAuthorization();
+        }
+        internal void CancelAuthorization(string id) {
+            int count = authorizations.Count;
+            for (int i = 0; i < count; i++) { var queued = authorizations.Dequeue(); if (queued[1] != id) authorizations.Enqueue(queued); }
+            if (authorizationBrowser != null && currentAuthorizationId == id) authorizationBrowser.Close();
+        }
         internal void NextAuthorization() {
-            if (closing || authorizationBrowser != null || Controller.HasActiveTransfers) return;
+            if (closing || authorizationBrowser != null || !Controller.CanStartAuthorization) return;
             while (authorizations.Count > 0) {
                 var next = authorizations.Dequeue();
                 var row = storage.Downloads.Find(x => Data.Str(x, "id") == next[1]);
                 if (row == null || Data.Str(row, "status") != "waiting-authorization") continue;
-                authorizationBrowser = OpenBrowser(next[0], false, "", next[1]);
-                currentAuthorizationId = next[1];
-                authorizationBrowser.FormClosed += delegate { authorizationBrowser = null; currentAuthorizationId = null; if (!closing) BeginInvoke(new Action(NextAuthorization)); };
-                break;
+                BrowserForm nextBrowser = null;
+                try {
+                    nextBrowser = OpenBrowser(next[0], false, "", next[1], false);
+                    authorizationBrowser = nextBrowser; currentAuthorizationId = next[1];
+                    nextBrowser.FormClosed += delegate {
+                        if (ReferenceEquals(authorizationBrowser, nextBrowser)) { authorizationBrowser = null; currentAuthorizationId = null; }
+                        if (!closing) {
+                            if (!nextBrowser.DownloadCaptured) Controller.AuthorizationFailed(next[1], "The Nexus authorization window was closed. Retry this download when ready.", "authorization-closed");
+                            if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(NextAuthorization));
+                        }
+                    };
+                    nextBrowser.Show(this);
+                    break;
+                } catch {
+                    authorizationBrowser = null; currentAuthorizationId = null;
+                    if (nextBrowser != null) { nextBrowser.Close(); nextBrowser.Dispose(); }
+                    Controller.AuthorizationFailed(next[1], "The Nexus authorization window could not start. Retry this download.", "authorization-failed");
+                }
             }
         }
         internal void OpenHistory(string domain) { OpenBrowser(BrowserImport.HistoryUrl(domain), true, domain); }
-        private BrowserForm OpenBrowser(string url, bool history, string domain, string downloadId = null) {
+        private BrowserForm OpenBrowser(string url, bool history, string domain, string downloadId = null, bool show = true) {
             if (environment == null) throw new InvalidOperationException("The browser is still starting. Try again in a moment.");
             var browser = new BrowserForm(this, environment, url, history, domain, storage, downloadId);
-            browsers.Add(browser); browser.FormClosed += delegate { browsers.Remove(browser); }; browser.Show(this); return browser;
+            browsers.Add(browser); browser.FormClosed += delegate { browsers.Remove(browser); }; if (show) browser.Show(this); return browser;
         }
         internal async void ReceiveNxm(string uri) {
             try { WindowState = FormWindowState.Normal; Activate(); await Controller.ReceiveNxm(uri); }
@@ -284,11 +307,14 @@ namespace NexusM
         private readonly Label status = new Label();
         private readonly System.Windows.Forms.Timer downloadTimer = new System.Windows.Forms.Timer { Interval = 500 };
         private readonly string downloadId, flowScript;
-        private bool importing, polling, navigating, captured, revealed;
-        private DateTime flowStarted;
+        private bool importing, polling, navigating, captured, revealed, authorizationEnded;
+        private DateTime flowStarted = DateTime.UtcNow;
+        private readonly int authorizationTimeoutSeconds;
+        internal bool DownloadCaptured { get { return captured; } }
         protected override bool ShowWithoutActivation { get { return !history && !revealed; } }
         internal BrowserForm(MainForm parent, CoreWebView2Environment env, string initialUrl, bool isHistory, string selectedDomain, Storage storage, string selectedDownload = null) {
             owner = parent; environment = env; url = initialUrl; history = isHistory;
+            authorizationTimeoutSeconds = (int)Math.Max(300, Math.Min(1200, Data.Num(storage.Settings, "downloadTimeoutSeconds") * 2));
             downloadId = selectedDownload;
             if (!history && !String.IsNullOrEmpty(downloadId)) {
                 string[] parts = downloadId.Split(':'); long modId, fileId;
@@ -317,13 +343,14 @@ namespace NexusM
             var external = new Button { Text = "Open in browser", AutoSize = true, FlatStyle = FlatStyle.Flat };
             external.Click += delegate { owner.OpenSafeUrl(browser.Source == null ? url : browser.Source.AbsoluteUri); };
             toolbar.Controls.Add(external); Controls.Add(toolbar);
-            downloadTimer.Tick += async delegate { await AdvanceDownload(); };
+            downloadTimer.Tick += async delegate { CheckAuthorizationTimeout(DateTime.UtcNow); if (!authorizationEnded) await AdvanceDownload(); };
             FormClosed += delegate { downloadTimer.Stop(); downloadTimer.Dispose(); };
-            Shown += async delegate { await Initialize(); };
+            Shown += async delegate { if (flowScript != null) downloadTimer.Start(); await Initialize(); };
         }
         private async Task Initialize() {
             try {
                 await browser.EnsureCoreWebView2Async(environment);
+                if (IsDisposed || authorizationEnded) return;
                 browser.CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
                 browser.CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
                 browser.CoreWebView2.Settings.IsStatusBarEnabled = true;
@@ -340,18 +367,29 @@ namespace NexusM
                     e.Handled = true; if (!CaptureNxm(e.Uri)) { Uri target; if (Uri.TryCreate(e.Uri, UriKind.Absolute, out target) && target.Scheme == "https") browser.CoreWebView2.Navigate(target.AbsoluteUri); }
                 };
                 browser.CoreWebView2.LaunchingExternalUriScheme += delegate(object sender, CoreWebView2LaunchingExternalUriSchemeEventArgs e) { if (CaptureNxm(e.Uri)) e.Cancel = true; };
-                flowStarted = DateTime.UtcNow;
-                if (flowScript != null) downloadTimer.Start();
                 browser.CoreWebView2.Navigate(url);
-            } catch (Exception ex) { Reveal(ex.Message); }
+            } catch {
+                if (history) Reveal("The Nexus browser could not start. Close this window and try importing again.");
+                else EndAuthorization("authorization-failed", "The Nexus authorization window could not start. Retry this download.");
+            }
+        }
+        internal void CheckAuthorizationTimeout(DateTime utcNow) {
+            if (history || captured || authorizationEnded || IsDisposed || (utcNow - flowStarted).TotalSeconds < authorizationTimeoutSeconds) return;
+            EndAuthorization("authorization-timeout", "Nexus did not authorize this file before the timeout. The download is kept; retry it after signing in or completing the browser check.");
+        }
+        private void EndAuthorization(string code, string message) {
+            if (history || captured || authorizationEnded || IsDisposed) return;
+            authorizationEnded = true; downloadTimer.Stop();
+            owner.Controller.AuthorizationFailed(downloadId, message, code);
+            Close();
         }
         private async Task AdvanceDownload() {
-            if (polling || captured || IsDisposed || flowScript == null || browser.CoreWebView2 == null) return;
+            if (polling || captured || authorizationEnded || IsDisposed || flowScript == null || browser.CoreWebView2 == null) return;
             if (navigating) { if ((DateTime.UtcNow - flowStarted).TotalSeconds > 45) Reveal("Nexus is taking a while to load. Continue in this window."); return; }
             polling = true;
             try {
                 string raw = await browser.ExecuteScriptAsync(flowScript);
-                if (captured || IsDisposed) return;
+                if (captured || authorizationEnded || IsDisposed) return;
                 var result = Data.Map(Data.Json.DeserializeObject(raw));
                 string message = Data.Str(result, "message"), phase = Data.Str(result, "status");
                 if (phase == "needs-user" || phase == "error") Reveal(message);
@@ -360,18 +398,27 @@ namespace NexusM
                     owner.Controller.AuthorizationStatus(downloadId, message, revealed);
                     if ((DateTime.UtcNow - flowStarted).TotalSeconds > 120 && !revealed) Reveal("Nexus has not started this download yet. Continue in this window.");
                 }
-            } catch { if (!captured && !IsDisposed) Reveal("Continue the download in this Nexus window."); }
+            } catch { if (!captured && !authorizationEnded && !IsDisposed) Reveal("Continue the download in this Nexus window."); }
             finally { polling = false; }
         }
         internal void Reveal(string message) {
-            if (IsDisposed || captured) return;
+            if (IsDisposed || captured || authorizationEnded) return;
             status.Text = message;
             if (!history) owner.Controller.AuthorizationStatus(downloadId, message, true);
             if (!revealed) { revealed = true; Opacity = 1; ShowInTaskbar = true; WindowState = FormWindowState.Normal; Show(); Activate(); }
         }
         private bool CaptureNxm(string uri) {
             if (!uri.StartsWith("nxm://", StringComparison.OrdinalIgnoreCase)) return false;
-            if (captured) return true;
+            if (authorizationEnded || captured || IsDisposed) return true;
+            if (!String.IsNullOrEmpty(downloadId)) {
+                try {
+                    if (DownloadRequest.ParseNxm(uri, "").Id != downloadId) {
+                        EndAuthorization("authorization-mismatch", "Nexus returned a link for a different file. Retry the selected download."); return true;
+                    }
+                } catch (ArgumentException) {
+                    EndAuthorization("authorization-invalid", "Nexus returned an invalid download link. Retry the selected download."); return true;
+                }
+            }
             captured = true; downloadTimer.Stop();
             owner.ReceiveNxm(uri); BeginInvoke(new Action(Close)); return true;
         }

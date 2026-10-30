@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace NexusM
@@ -29,6 +31,21 @@ namespace NexusM
                 Check("import merges newer download and reviewed dates without rollback or duplicates", TestDateMerge);
                 Check("invalid imported domains and IDs are ignored, valid domains are normalized", TestInvalidImports);
                 Check("incomplete transfers recover as interrupted without corrupting finished records", TestInterruptedStartup);
+                Check("all unfinished downloads survive queues larger than the old 500-entry limit", TestLargeQueuePersistence);
+                Check("download configuration validates atomically and persists across restarts", TestDownloadConfiguration);
+                Check("corrupt state recovers its backup and preserves unreadable originals", TestQueueStateBackup);
+                Check("saved unfinished downloads recover FIFO once with their original folder", TestQueueRecovery);
+                Check("disabled recovery, unavailable accounts and explicit cancellation retain queue intent safely", TestQueueRecoveryGuards);
+                Check("authorization failures retain redacted bounded per-download logs", TestQueueFailureLogs);
+                Check("failed queue admission rolls back pending state and can be retried after disk recovery", TestQueueAdmissionFailure);
+                Check("queue progress and shutdown still release transfers when checkpoint writes fail", TestQueueCheckpointFailure);
+                Check("unfinished backups preserve folders, FIFO order, retry deadlines and sanitized logs", TestQueueBackupMetadata);
+                Check("unacknowledged completed archives reconcile history offline across restart", TestQueueCompletionReceipt);
+                Check("server retry deadlines survive restart and block premature manual and automatic retry", TestQueueRetryDeadline);
+                Check("a later manual refresh reconnects and restores an offline saved queue", TestQueueOfflineReconnect);
+                Check("new links arriving during settings changes are saved for fresh authorization", TestQueueSettingsGate);
+                Check("temporary recovery checkpoint failures keep every job resumable and recover on refresh", TestQueueRecoverySaveFailure);
+                Check("all queue admission paths honor a saved server retry deadline before network or mutation", TestQueueAdmissionRetryDeadline);
                 Check("malformed settings and state recover with a safe default download folder", TestMalformedStorage);
                 Check("DPAPI credential stays outside public state, disk state, and exported backup", TestCredentialIsolation);
                 Check("saved library and per-file download history round trip without a key or network", TestOfflineRoundTrip);
@@ -200,6 +217,319 @@ namespace NexusM
                 if (i < 5) Expect(Data.Str(storage.Downloads[i], "error").Length > 0, "Interrupted transfer has no recovery explanation.");
             }
             Expect(!Data.Bool(storage.State, "connected"), "Startup should begin disconnected until authentication succeeds.");
+        }
+
+        private static Dictionary<string, object> QueueRow(int id, string status, string folder, long order)
+        {
+            return Data.Obj("id", "fixturegame:1:" + id, "gameDomain", "fixturegame", "modId", 1, "fileId", id,
+                "name", "Queue archive " + id, "status", status, "folder", folder, "queuedAt", 1000L + order, "queueOrder", order,
+                "downloadedBytes", 1234L, "bytes", 1234L, "totalBytes", 5000L, "total", 5000L, "speed", 9999L,
+                "retryAt", 2000L, "resumeOnStartup", status == "interrupted");
+        }
+
+        private static void TestLargeQueuePersistence()
+        {
+            Storage storage = NewStore("large-queue"); string folder = Path.Combine(root, "large-archives");
+            string[] statuses = { "queued", "downloading", "waiting-authorization", "retrying", "authorizing", "failed", "cancelled", "completed" };
+            for (int i = 1; i <= 1200; i++) storage.Downloads.Add(QueueRow(i, statuses[(i - 1) % statuses.Length], folder, i));
+            storage.Save(); Storage reopened = new Storage(storage.Root);
+            Expect(storage.Downloads.Count == 1200 && reopened.Downloads.Count == 1200, "Saving silently discarded old unfinished downloads.");
+            for (int i = 0; i < reopened.Downloads.Count; i++) {
+                object row = reopened.Downloads[i]; string original = statuses[i % statuses.Length];
+                Expect(Data.Num(row, "downloadedBytes") == 1234L && Data.Num(row, "speed") == 0L && Data.Num(row, "retryAt") == 0L, "Recovery lost partial progress or retained transient speed/backoff.");
+                Expect(Data.Str(row, "folder") == folder, "Recovery redirected a saved job's folder.");
+                bool unfinished = new[] { "queued", "downloading", "waiting-authorization", "retrying", "authorizing" }.Contains(original);
+                Expect(Data.Str(row, "status") == (unfinished ? "interrupted" : original), "Recovery changed the wrong terminal state.");
+                Expect(Data.Bool(row, "resumeOnStartup") == unfinished, "Recovery lost resume intent or reactivated a terminal row.");
+            }
+        }
+
+        private static void TestDownloadConfiguration()
+        {
+            Storage storage = NewStore("download-config");
+            Expect(Data.Num(storage.Settings, "maxParallelDownloads") == 2 && Data.Num(storage.Settings, "maxDownloadRetries") == 3 && Data.Bool(storage.Settings, "resumeDownloadsOnStartup"), "Download defaults are missing.");
+            WithController(storage, delegate(Controller controller) {
+                controller.Handle("saveSettings", Data.Obj("maxParallelDownloads", 4, "maxDownloadRetries", 0, "downloadTimeoutSeconds", 600, "retryDelaySeconds", 60, "resumeDownloadsOnStartup", false)).GetAwaiter().GetResult();
+                var reopened = new Storage(storage.Root);
+                Expect(Data.Num(reopened.Settings, "maxParallelDownloads") == 4 && Data.Num(reopened.Settings, "maxDownloadRetries") == 0 && !Data.Bool(reopened.Settings, "resumeDownloadsOnStartup"), "Download options did not persist.");
+                object[] bad = { Data.Obj("maxParallelDownloads", 0), Data.Obj("maxParallelDownloads", 5), Data.Obj("maxParallelDownloads", "2"), Data.Obj("maxDownloadRetries", 11), Data.Obj("downloadTimeoutSeconds", 14), Data.Obj("downloadTimeoutSeconds", 601), Data.Obj("retryDelaySeconds", 0), Data.Obj("resumeDownloadsOnStartup", "yes") };
+                foreach (object payload in bad) {
+                    bool rejected = false; try { controller.Handle("saveSettings", payload).GetAwaiter().GetResult(); } catch (ArgumentException) { rejected = true; }
+                    Expect(rejected && Data.Num(storage.Settings, "maxParallelDownloads") == 4 && !Data.Bool(storage.Settings, "resumeDownloadsOnStartup"), "An invalid setting partly changed the saved configuration.");
+                }
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                using (var active = new CancellationTokenSource()) {
+                    transfers["active-config-fixture"] = active;
+                    try {
+                        bool rejected = false; try { controller.Handle("saveSettings", Data.Obj("maxParallelDownloads", 1, "resumeDownloadsOnStartup", true)).GetAwaiter().GetResult(); } catch (InvalidOperationException) { rejected = true; }
+                        Expect(rejected && Data.Num(storage.Settings, "maxParallelDownloads") == 4 && !Data.Bool(storage.Settings, "resumeDownloadsOnStartup"), "Changing active transfer options was not rejected atomically.");
+                    } finally { transfers.Remove("active-config-fixture"); }
+                }
+            });
+            File.WriteAllText(Path.Combine(storage.Root, "state.json"), "{\"settings\":{\"maxParallelDownloads\":99,\"maxDownloadRetries\":-1,\"downloadTimeoutSeconds\":\"90\",\"retryDelaySeconds\":false,\"resumeDownloadsOnStartup\":\"yes\"}}");
+            var malformed = new Storage(storage.Root);
+            Expect(Data.Num(malformed.Settings, "maxParallelDownloads") == 2 && Data.Num(malformed.Settings, "maxDownloadRetries") == 3 && Data.Num(malformed.Settings, "downloadTimeoutSeconds") == 90 && Data.Num(malformed.Settings, "retryDelaySeconds") == 2 && Data.Bool(malformed.Settings, "resumeDownloadsOnStartup"), "Malformed persisted options were not normalized.");
+        }
+
+        private static void TestQueueStateBackup()
+        {
+            Storage storage = NewStore("queue-backup"); string path = Path.Combine(storage.Root, "state.json");
+            storage.Downloads.Add(QueueRow(1, "queued", Path.Combine(root, "backup-archives"), 1)); storage.Save();
+            storage.Downloads.Add(QueueRow(2, "queued", Path.Combine(root, "backup-archives"), 2)); storage.Save();
+            File.WriteAllText(path, "unreadable primary fixture");
+            var restored = new Storage(storage.Root);
+            Expect(restored.Downloads.Count == 1 && Data.Str(restored.Downloads[0], "id") == "fixturegame:1:1", "The previous valid queue snapshot was not recovered.");
+            Expect(Data.Str(restored.State, "notice").Contains("Recovered") && Directory.GetFiles(storage.Root, "state-unreadable-*.json").Length == 1, "Backup recovery did not report or preserve the unreadable file.");
+            restored.Save(); var again = new Storage(storage.Root);
+            Expect(again.Downloads.Count == 1 && Data.List(Data.Get(Data.Json.DeserializeObject(File.ReadAllText(path + ".bak")), "downloads")).Count == 1, "Saving restored state destroyed the known-good backup.");
+            File.WriteAllText(path, "bad primary again"); File.WriteAllText(path + ".bak", "bad backup fixture");
+            var lost = new Storage(storage.Root);
+            Expect(Data.Str(lost.State, "notice").Contains("could not be read") && Directory.GetFiles(storage.Root, "state-unreadable-*.json").Length == 3, "Unrecoverable files were silently discarded.");
+        }
+
+        private static void TestQueueRecovery()
+        {
+            Storage storage = NewStore("queue-recovery"); string folder = Path.Combine(root, "original-queue-folder");
+            storage.Settings["downloadFolder"] = Path.Combine(root, "changed-default-folder");
+            storage.Downloads.Add(QueueRow(2, "interrupted", folder, 2)); storage.Downloads.Add(QueueRow(1, "interrupted", folder, 1));
+            storage.Downloads.Add(QueueRow(3, "failed", folder, 3)); storage.Downloads.Add(QueueRow(4, "cancelled", folder, 4)); storage.Downloads.Add(QueueRow(5, "completed", folder, 5));
+            WithController(storage, delegate(Controller controller) {
+                controller.Api = new NexusApi("fixture-only-key"); storage.State["connected"] = true;
+                var ids = new List<string>();
+                controller.ResumePendingDownloads(delegate(string url, string id) {
+                    var disk = Data.Json.DeserializeObject(File.ReadAllText(Path.Combine(storage.Root, "state.json")));
+                    object saved = Data.List(Data.Get(disk, "downloads")).Single(row => Data.Str(row, "id") == id);
+                    Expect(Data.Str(saved, "status") == "waiting-authorization" && Data.Str(saved, "folder") == folder, "Authorization began before the pinned job was persisted.");
+                    Expect(!url.Contains("fixture-only-key") && url.EndsWith("&nmm=1", StringComparison.Ordinal), "Recovery persisted or used an account credential as download authorization.");
+                    ids.Add(id);
+                });
+                controller.ResumePendingDownloads(delegate(string url, string id) { ids.Add(id); });
+                Expect(ids.SequenceEqual(new[] { "fixturegame:1:1", "fixturegame:1:2" }), "Recovery reordered, duplicated, or reactivated terminal downloads.");
+                Expect(controller.CanStartAuthorization, "Available parallel slots did not allow authorization.");
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                using (var one = new CancellationTokenSource()) using (var two = new CancellationTokenSource()) {
+                    transfers["one"] = one; transfers["two"] = two;
+                    Expect(!controller.CanStartAuthorization, "The browser scheduler ignored the configured parallel limit.");
+                    transfers.Clear();
+                }
+            });
+            Storage reopened = new Storage(storage.Root);
+            Expect(reopened.Downloads.Count == 5 && reopened.Downloads.Take(2).All(row => Data.Str(row, "status") == "interrupted" && Data.Bool(row, "resumeOnStartup")), "Closing the app lost queued recovery intent.");
+        }
+
+        private static void TestQueueRecoveryGuards()
+        {
+            Storage storage = NewStore("queue-recovery-guards"); string folder = Path.Combine(root, "guard-archives");
+            storage.Downloads.Add(QueueRow(1, "interrupted", folder, 1));
+            WithController(storage, delegate(Controller controller) {
+                int callbacks = 0; Action<string, string> authorize = delegate { callbacks++; };
+                controller.ResumePendingDownloads(authorize); Expect(callbacks == 0 && Data.Bool(storage.Downloads[0], "resumeOnStartup"), "A missing account discarded recovery intent.");
+                controller.Api = new NexusApi("fixture-only-key"); storage.State["connected"] = true; storage.Settings["resumeDownloadsOnStartup"] = false;
+                controller.ResumePendingDownloads(authorize); Expect(callbacks == 0 && Data.Str(storage.Downloads[0], "status") == "interrupted", "Disabled automatic recovery started a download.");
+                storage.Settings["resumeDownloadsOnStartup"] = true; controller.ResumePendingDownloads(authorize);
+                controller.Handle("cancelDownload", Data.Obj("id", "fixturegame:1:1")).GetAwaiter().GetResult();
+                Expect(Data.Str(storage.Downloads[0], "status") == "cancelled" && !Data.Bool(storage.Downloads[0], "resumeOnStartup"), "Explicit cancellation was not saved before shutdown.");
+            });
+            var reopened = new Storage(storage.Root);
+            Expect(Data.Str(reopened.Downloads.Single(), "status") == "cancelled" && !Data.Bool(reopened.Downloads.Single(), "resumeOnStartup"), "An explicitly cancelled job was reactivated on restart.");
+        }
+
+        private static void TestQueueFailureLogs()
+        {
+            Storage storage = NewStore("queue-failure-logs"); var row = QueueRow(1, "waiting-authorization", Path.Combine(root, "log-archives"), 1); storage.Downloads.Add(row);
+            WithController(storage, delegate(Controller controller) {
+                controller.AuthorizationFailed("fixturegame:1:1", "Nexus timed out https://cdn.nexusmods.com/archive?key=synthetic-secret token=another-secret", "authorization_timeout");
+                string saved = File.ReadAllText(Path.Combine(storage.Root, "state.json"));
+                Expect(Data.Str(row, "status") == "failed" && Data.Str(row, "errorCode") == "authorization_timeout" && !Data.Bool(row, "resumeOnStartup"), "An authorization timeout lost its queue entry or left it blocking.");
+                Expect(!saved.Contains("synthetic-secret") && !saved.Contains("another-secret"), "Queue errors or logs leaked signed download credentials.");
+                MethodInfo append = typeof(Controller).GetMethod("QueueEvent", BindingFlags.NonPublic | BindingFlags.Static);
+                for (int i = 0; i < 60; i++) append.Invoke(null, new object[] { row, "fixture", "Log entry " + i });
+                var events = Data.List(Data.Get(row, "events"));
+                Expect(events.Count == 40 && Data.Str(events.First(), "message") == "Log entry 20" && Data.Num(events.Last(), "time") > 0, "Per-job logs were unbounded or lost event timestamps.");
+                controller.AuthorizationFailed("fixturegame:1:1", "Late failure", "late");
+                Expect(Data.Str(row, "errorCode") == "authorization_timeout", "A late browser callback overwrote a terminal download.");
+            });
+        }
+
+        private static bool EnqueueFixture(Controller controller, int fileId, Action<string, string> authorize)
+        {
+            return (bool)typeof(Controller).GetMethod("QueueDownloadAuthorization", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(controller,
+                new object[] { "fixturegame", 1L, (long)fileId, Data.Obj("name", "Enqueue fixture", "size", 4096L), authorize });
+        }
+
+        private static void TestQueueAdmissionFailure()
+        {
+            Storage storage = NewStore("queue-admission-failure");
+            WithController(storage, delegate(Controller controller) {
+                int authorizations = 0;
+                using (var locked = new FileStream(Path.Combine(storage.Root, "state.json.tmp"), FileMode.Create, FileAccess.Write, FileShare.None)) {
+                    bool rejected = false; try { EnqueueFixture(controller, 1, delegate { authorizations++; }); } catch (TargetInvocationException error) { rejected = error.InnerException is IOException; }
+                    var pending = (HashSet<string>)typeof(Controller).GetField("pending", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                    Expect(rejected && authorizations == 0 && storage.Downloads.Count == 0 && pending.Count == 0, "Failed persistence left an undurable phantom job or started authorization.");
+                }
+                Expect(EnqueueFixture(controller, 1, delegate { authorizations++; }) && authorizations == 1, "A failed admission could not be retried after disk access recovered.");
+                controller.Api = new NexusApi("fixture-only-key");
+                using (var locked = new FileStream(Path.Combine(storage.Root, "state.json.tmp"), FileMode.Create, FileAccess.Write, FileShare.None)) {
+                    bool rejected = false; try { controller.ReceiveNxm("nxm://fixturegame/mods/1/files/1?key=synthetic-fresh-link&expires=1900000000&user_id=7").GetAwaiter().GetResult(); } catch (IOException) { rejected = true; }
+                    var pending = (HashSet<string>)typeof(Controller).GetField("pending", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                    Expect(rejected && !pending.Contains("fixturegame:1:1") && Data.Str(storage.Downloads.Single(), "status") == "interrupted", "An unsaved fresh link stranded its job in the pending authorization queue.");
+                }
+                Expect(EnqueueFixture(controller, 1, delegate { authorizations++; }) && authorizations == 2, "Retry stayed blocked after a fresh-link checkpoint failed.");
+                var row = Data.Map(storage.Downloads.Single());
+                controller.Handle("cancelDownload", Data.Obj("id", Data.Str(row, "id"))).GetAwaiter().GetResult();
+                string original = Path.Combine(root, "admission-original"), changed = Path.Combine(root, "admission-changed"); row["folder"] = original; storage.Settings["downloadFolder"] = changed;
+                Expect(EnqueueFixture(controller, 1, delegate { }) && Data.Str(storage.Downloads.Single(), "folder") == original, "A resumable retry abandoned the original partial folder.");
+                controller.Handle("cancelDownload", Data.Obj("id", Data.Str(row, "id"))).GetAwaiter().GetResult();
+                Data.Map(storage.Downloads.Single())["status"] = "completed";
+                Expect(EnqueueFixture(controller, 1, delegate { }) && Data.Str(storage.Downloads.Single(), "folder") == changed, "A new download of a completed file ignored the new configured folder.");
+            });
+        }
+
+        private static void TestQueueCheckpointFailure()
+        {
+            Storage storage = NewStore("queue-checkpoint-failure"); var row = QueueRow(1, "downloading", Path.Combine(root, "checkpoint-archives"), 1); row["resumeOnStartup"] = true; storage.Downloads.Add(row); storage.Save();
+            MainForm form = new MainForm(storage, null, null, "checkpoint-fixture");
+            using (form) using (var transfer = new CancellationTokenSource()) {
+                Controller controller = form.Controller;
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller); transfers["fixturegame:1:1"] = transfer;
+                using (var locked = new FileStream(Path.Combine(storage.Root, "state.json.tmp"), FileMode.Create, FileAccess.Write, FileShare.None)) {
+                    typeof(Controller).GetMethod("DownloadProgress", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(controller,
+                        new object[] { Data.Obj("id", "fixturegame:1:1", "status", "retrying", "downloadedBytes", 2345L, "totalBytes", 5000L, "error", "A network timeout occurred.") });
+                    Expect(Data.Bool(storage.State, "queuePersistenceError") && Data.Num(row, "bytes") == 2345L, "A failed progress checkpoint crashed or discarded current in-memory progress.");
+                    controller.Dispose(); Expect(transfer.IsCancellationRequested, "Failed shutdown checkpoint prevented cancellation and resource release.");
+                }
+                var reopened = new Storage(storage.Root);
+                Expect(reopened.Downloads.Count == 1 && Data.Str(reopened.Downloads[0], "status") == "interrupted" && Data.Bool(reopened.Downloads[0], "resumeOnStartup"), "Failed shutdown persistence lost the previously durable recovery intent.");
+            }
+        }
+
+        private static void TestQueueBackupMetadata()
+        {
+            Storage storage = NewStore("queue-backup-metadata"); string original = Path.Combine(root, "backup-original-folder"); long retryAt = Data.Now() + 600;
+            var row = QueueRow(7, "interrupted", original, 17); row["attempt"] = 2L; row["maxAttempts"] = 4L; row["retryAt"] = retryAt; row["errorCode"] = "rate-limited";
+            row["events"] = Enumerable.Range(0, 60).Select(index => Data.Obj("time", 1000L + index, "code", "fixture", "message", index == 59 ? "https://cdn.nexusmods.com/x?key=never-export-this" : "Event " + index)).Cast<object>().ToList();
+            WithController(storage, delegate(Controller controller) {
+                Import(controller, Data.Obj("items", new object[0], "schemaVersion", 1, "games", new object[0], "mods", new object[0], "downloads", new[] { row }));
+                object restored = storage.Downloads.Single(); var events = Data.List(Data.Get(restored, "events"));
+                Expect(Data.Str(restored, "folder") == original && Data.Num(restored, "queueOrder") == 17 && Data.Num(restored, "queuedAt") == 1017L && Data.Bool(restored, "resumeOnStartup"), "Backup restore lost durable queue location, order, or intent.");
+                Expect(Data.Num(restored, "attempt") == 2 && Data.Num(restored, "maxAttempts") == 4 && Data.Num(restored, "retryAt") == retryAt, "Backup restore discarded attempt or server backoff state.");
+                Expect(events.Count == 40 && Data.Str(events[0], "message") == "Event 20" && !Data.Json.Serialize(restored).Contains("never-export-this"), "Restored logs were not bounded to the newest safe events.");
+            });
+        }
+
+        private static void TestQueueCompletionReceipt()
+        {
+            foreach (string status in new[] { "interrupted", "completed" }) {
+                Storage storage = NewStore("queue-receipt-" + status); string folder = Path.Combine(root, "receipt-archives-" + status); Directory.CreateDirectory(folder);
+                string target = Path.Combine(folder, "final.zip"), marker = Path.Combine(folder, ".nexusm-fixturegame-1-9.part.json"); File.WriteAllText(target, "complete fixture archive"); var file = new FileInfo(target);
+                var row = QueueRow(9, status, folder, 1); row["path"] = target; storage.Downloads.Add(row); storage.Mods.Add(Data.Obj("gameDomain", "fixturegame", "modId", 1, "lastDownloadedAt", 500L, "updatedAt", 700L)); storage.Save();
+                File.WriteAllText(marker, Data.Json.Serialize(Data.Obj("id", "fixturegame:1:9", "gameDomain", "fixturegame", "modId", 1, "fileId", 9, "phase", "finalizing", "path", target,
+                    "name", "Final archive", "filename", "final.zip", "version", "2.0", "downloadedAt", 1000L, "downloadedBytes", file.Length, "totalBytes", file.Length,
+                    "fileLength", file.Length, "fileCreatedUtcTicks", file.CreationTimeUtc.Ticks, "fileModifiedUtcTicks", file.LastWriteTimeUtc.Ticks)));
+                Storage reopened = new Storage(storage.Root);
+                WithController(reopened, delegate(Controller controller) {
+                    Expect(Data.Str(reopened.Downloads.Single(), "status") == "completed" && !Data.Bool(reopened.Downloads.Single(), "resumeOnStartup"), "Finalized archive was queued for duplicate download.");
+                    Expect(Data.Num(Data.Get(Data.Get(reopened.State, "fileDownloads"), "fixturegame:1:9"), "downloadedAt") == 1000L && Data.Num(reopened.Mods.Single(), "lastDownloadedAt") == 1000L, "Offline finalization recovery missed per-file or mod download history.");
+                    Expect(!File.Exists(marker) && File.ReadAllText(target) == "complete fixture archive" && controller.Api == null, "Completion recovery used network, changed the archive, or failed to acknowledge its saved receipt.");
+                });
+            }
+        }
+
+        private static void TestQueueRetryDeadline()
+        {
+            Storage storage = NewStore("queue-retry-deadline"); var row = QueueRow(1, "retrying", Path.Combine(root, "deadline-archives"), 1); long retryAt = Data.Now() + 600;
+            row["errorCode"] = "rate-limited"; row["retryAt"] = retryAt; storage.Downloads.Add(row); storage.Save();
+            Storage reopened = new Storage(storage.Root);
+            Expect(Data.Num(reopened.Downloads.Single(), "retryAt") == retryAt && Data.Str(reopened.Downloads.Single(), "errorCode") == "rate-limited", "Restart discarded the server's retry deadline.");
+            WithController(reopened, delegate(Controller controller) {
+                controller.Api = new NexusApi("fixture-only-key"); reopened.State["connected"] = true; int authorizations = 0;
+                controller.ResumePendingDownloads(delegate { authorizations++; });
+                bool rejected = false; try { controller.Handle("retryDownload", Data.Obj("id", "fixturegame:1:1")).GetAwaiter().GetResult(); } catch (InvalidOperationException) { rejected = true; }
+                Expect(rejected && authorizations == 0 && Data.Str(reopened.Downloads.Single(), "status") == "interrupted", "Manual or automatic retry ignored the server's minimum wait.");
+            });
+        }
+
+        private static void TestQueueOfflineReconnect()
+        {
+            Storage storage = NewStore("queue-offline-reconnect"); storage.Downloads.Add(QueueRow(1, "interrupted", Path.Combine(root, "offline-archives"), 1));
+            WithController(storage, delegate(Controller controller) {
+                controller.Api = new NexusApi("fixture-only-key");
+                typeof(NexusApi).GetField("validated", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(controller.Api, Data.Obj("user_id", 7L, "name", "Fixture account", "is_premium", false));
+                storage.State["connected"] = false;
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                using (var one = new CancellationTokenSource()) using (var two = new CancellationTokenSource()) {
+                    transfers["one"] = one; transfers["two"] = two;
+                    try {
+                        controller.Handle("refresh", Data.Obj()).GetAwaiter().GetResult();
+                        Expect(Data.Bool(storage.State, "connected") && Data.Str(storage.Downloads.Single(), "status") == "waiting-authorization", "Refreshing after offline startup never reconnected or restored the saved queue.");
+                    } finally { transfers.Clear(); }
+                }
+            });
+        }
+
+        private static void TestQueueSettingsGate()
+        {
+            Storage storage = NewStore("queue-settings-gate");
+            WithController(storage, delegate(Controller controller) {
+                controller.Api = new NexusApi("fixture-only-key"); storage.State["connected"] = true;
+                FieldInfo gate = typeof(Controller).GetField("changingSettings", BindingFlags.Instance | BindingFlags.NonPublic); gate.SetValue(controller, true);
+                controller.ReceiveNxm("nxm://fixturegame/mods/1/files/9?key=synthetic-gated-link&expires=1900000000&user_id=7").GetAwaiter().GetResult();
+                Expect(!controller.CanStartAuthorization && storage.Downloads.Count == 1 && Data.Str(storage.Downloads.Single(), "status") == "interrupted" && Data.Bool(storage.Downloads.Single(), "resumeOnStartup"), "A link arriving during an account/settings change started on the old downloader or lost its durable intent.");
+                Expect(!File.ReadAllText(Path.Combine(storage.Root, "state.json")).Contains("synthetic-gated-link"), "A settings-delayed job persisted its signed URI.");
+                gate.SetValue(controller, false); int authorizations = 0;
+                controller.ResumePendingDownloads(delegate { authorizations++; });
+                Expect(authorizations == 1 && Data.Str(storage.Downloads.Single(), "status") == "waiting-authorization", "A settings-delayed job did not request fresh authorization afterward.");
+            });
+        }
+
+        private static void TestQueueRecoverySaveFailure()
+        {
+            Storage storage = NewStore("queue-recovery-save-failure"); string folder = Path.Combine(root, "recovery-save-archives");
+            storage.Downloads.Add(QueueRow(1, "interrupted", folder, 1)); storage.Downloads.Add(QueueRow(2, "interrupted", folder, 2)); storage.Save();
+            WithController(storage, delegate(Controller controller) {
+                controller.Api = new NexusApi("fixture-only-key"); storage.State["connected"] = true; int authorizations = 0;
+                using (var locked = new FileStream(Path.Combine(storage.Root, "state.json.tmp"), FileMode.Create, FileAccess.Write, FileShare.None)) {
+                    controller.ResumePendingDownloads(delegate { authorizations++; });
+                    var pending = (HashSet<string>)typeof(Controller).GetField("pending", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                    Expect(authorizations == 0 && pending.Count == 0 && Data.Bool(storage.State, "queuePersistenceError"), "Unsaved recovery started authorization, left pending state, or hid its checkpoint failure.");
+                    Expect(storage.Downloads.Count == 2 && storage.Downloads.All(row => Data.Str(row, "status") == "interrupted" && Data.Bool(row, "resumeOnStartup")), "A transient recovery checkpoint failure removed a job's resumable intent.");
+                }
+                var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(controller);
+                using (var one = new CancellationTokenSource()) using (var two = new CancellationTokenSource()) {
+                    transfers["one"] = one; transfers["two"] = two;
+                    try {
+                        controller.Handle("refresh", Data.Obj()).GetAwaiter().GetResult();
+                        Expect(storage.Downloads.All(row => Data.Str(row, "status") == "waiting-authorization") && !Data.Bool(storage.State, "queuePersistenceError"), "A connected manual refresh did not resume every retained job after checkpoint access recovered.");
+                    } finally { transfers.Clear(); }
+                }
+            });
+        }
+
+        private sealed class AdmissionTraffic : HttpMessageHandler
+        {
+            internal int Requests;
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+            {
+                Requests++; throw new InvalidOperationException("A server-wait admission reached the network.");
+            }
+        }
+
+        private static void TestQueueAdmissionRetryDeadline()
+        {
+            foreach (string code in new[] { "rate-limited", "server-error" }) {
+                Storage storage = NewStore("queue-admission-deadline-" + code); var row = QueueRow(1, "failed", Path.Combine(root, "admission-deadline-archives"), 1);
+                row["errorCode"] = code; row["retryAt"] = Data.Now() + 600; row["events"] = new[] { Data.Obj("time", Data.Now(), "code", code, "message", "Waiting for the server.") }; storage.Downloads.Add(row); storage.Save();
+                WithController(storage, delegate(Controller controller) {
+                    controller.Api = new NexusApi("fixture-only-key"); var traffic = new AdmissionTraffic();
+                    var client = typeof(NexusApi).GetField("client", BindingFlags.Instance | BindingFlags.NonPublic); ((HttpClient)client.GetValue(controller.Api)).Dispose(); client.SetValue(controller.Api, new HttpClient(traffic));
+                    string before = Data.Json.Serialize(storage.Downloads); int authorizations = 0;
+                    bool startRejected = false; try { controller.Handle("startDownload", Data.Obj("gameDomain", "fixturegame", "modId", 1, "fileId", 1)).GetAwaiter().GetResult(); } catch (InvalidOperationException) { startRejected = true; }
+                    bool batchRejected = false; try { EnqueueFixture(controller, 1, delegate { authorizations++; }); } catch (TargetInvocationException error) { batchRejected = error.InnerException is InvalidOperationException; }
+                    bool incomingRejected = false; try { controller.ReceiveNxm("nxm://fixturegame/mods/1/files/1?key=synthetic-deadline-link&expires=1900000000&user_id=7").GetAwaiter().GetResult(); } catch (InvalidOperationException) { incomingRejected = true; }
+                    Expect(startRejected && batchRejected && incomingRejected && authorizations == 0 && traffic.Requests == 0, "A download control or incoming Nexus link bypassed the server's retry deadline.");
+                    Expect(Data.Json.Serialize(storage.Downloads) == before && storage.Downloads.Count == 1, "Rejecting early retry reset its deadline, changed its log, or duplicated the saved job.");
+                });
+            }
         }
 
         private static void TestMalformedStorage()

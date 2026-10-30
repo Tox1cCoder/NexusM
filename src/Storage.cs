@@ -32,10 +32,21 @@ namespace NexusM
         internal readonly string Root;
         internal Dictionary<string, object> State;
         private string StateFile { get { return Path.Combine(Root, "state.json"); } }
+        private string BackupFile { get { return StateFile + ".bak"; } }
+        private bool restoredBackup, stateWriteBlocked;
         internal Storage(string root = null) {
             Root = root ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexusM");
             Directory.CreateDirectory(Root);
-            try { State = Data.Map(Data.Json.DeserializeObject(File.ReadAllText(StateFile))); } catch { State = new Dictionary<string, object>(); }
+            State = ReadState(StateFile);
+            if (State == null) {
+                State = ReadState(BackupFile);
+                restoredBackup = State != null;
+                if (File.Exists(StateFile)) PreserveUnreadable(StateFile);
+                if (State == null && File.Exists(BackupFile)) PreserveUnreadable(BackupFile);
+                State = State ?? new Dictionary<string, object>();
+                if (restoredBackup) State["notice"] = "Recovered your library and download queue from the previous saved state. The unreadable state file was preserved.";
+                else if (File.Exists(StateFile) || File.Exists(BackupFile)) State["notice"] = "The saved state and its backup could not be read. The unreadable files were preserved in the app data folder; restore a library backup before queuing downloads.";
+            }
             if (!State.ContainsKey("games")) State["games"] = new List<object>(); else State["games"] = Data.List(State["games"]);
             if (!State.ContainsKey("mods")) State["mods"] = new List<object>(); else State["mods"] = Data.List(State["mods"]);
             if (!State.ContainsKey("downloads")) State["downloads"] = new List<object>(); else State["downloads"] = Data.List(State["downloads"]);
@@ -44,15 +55,49 @@ namespace NexusM
             try { configuredFolder = NormalizeDownloadFolder(Data.Get(Settings, "downloadFolder")); } catch { configuredFolder = null; }
             Settings["downloadFolder"] = configuredFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "NexusM");
             if (!(Data.Get(Settings, "yourGamesOnly") is bool)) Settings["yourGamesOnly"] = true;
-            foreach (var entry in Downloads) {
+            NormalizeIntegerSetting("maxParallelDownloads", 2, 1, 4);
+            NormalizeIntegerSetting("maxDownloadRetries", 3, 0, 10);
+            NormalizeIntegerSetting("downloadTimeoutSeconds", 90, 15, 600);
+            NormalizeIntegerSetting("retryDelaySeconds", 2, 1, 60);
+            if (!(Data.Get(Settings, "resumeDownloadsOnStartup") is bool)) Settings["resumeDownloadsOnStartup"] = true;
+            long sequence = Downloads.Count == 0 ? 0 : Downloads.Max(row => Data.Num(row, "queueOrder"));
+            foreach (var entry in Downloads.AsEnumerable().Reverse()) {
                 var row = Data.Map(entry);
-                if (new[] { "downloading", "queued", "authorizing", "retrying", "waiting-authorization" }.Contains(Data.Str(row, "status"))) { row["status"] = "interrupted"; row["error"] = "The app closed before this download finished. Retry to authorize and resume."; }
+                if (row.ContainsKey("speed")) row["speed"] = 0L;
+                bool serverWait = new[] { "rate-limited", "server-error" }.Contains(Data.Str(row, "errorCode")) && Data.Num(row, "retryAt") > Data.Now();
+                if (row.ContainsKey("retryAt") && !serverWait) row["retryAt"] = 0L;
+                string status = Data.Str(row, "status");
+                if (!new[] { "completed", "cancelled", "canceled", "failed" }.Contains(status)) {
+                    if (Data.Str(row, "folder").Length == 0) row["folder"] = Settings["downloadFolder"];
+                    if (Data.Num(row, "queuedAt") <= 0) row["queuedAt"] = Data.Now();
+                    if (Data.Num(row, "queueOrder") <= 0) row["queueOrder"] = ++sequence;
+                }
+                if (new[] { "downloading", "queued", "authorizing", "retrying", "waiting-authorization", "awaiting-authorization", "waiting", "awaiting_authorization" }.Contains(status)) {
+                    row["status"] = "interrupted"; row["resumeOnStartup"] = true;
+                    if (!serverWait) row["errorCode"] = "app_closed";
+                    row["error"] = Data.Bool(Settings, "resumeDownloadsOnStartup") ? "Waiting to reconnect and resume this saved download." : "The app closed before this download finished. Retry to authorize and resume.";
+                }
+                else if (status == "interrupted" && !(Data.Get(row, "resumeOnStartup") is bool)) row["resumeOnStartup"] = true;
+                else if (row.ContainsKey("resumeOnStartup") && new[] { "completed", "cancelled", "canceled", "failed" }.Contains(status)) row["resumeOnStartup"] = false;
             }
             State["connected"] = false;
             State.Remove("refreshProgress");
             State.Remove("clearingDownloadFolder");
             State.Remove("downloadUpdates");
             State.Remove("downloadReplacements");
+        }
+        private static Dictionary<string, object> ReadState(string path) {
+            try { return Data.Json.DeserializeObject(File.ReadAllText(path)) as Dictionary<string, object>; }
+            catch { return null; }
+        }
+        private void PreserveUnreadable(string path) {
+            try { File.Copy(path, Path.Combine(Root, "state-unreadable-" + Guid.NewGuid().ToString("N") + ".json")); }
+            catch (IOException) { stateWriteBlocked = true; }
+            catch (UnauthorizedAccessException) { stateWriteBlocked = true; }
+        }
+        private void NormalizeIntegerSetting(string key, int fallback, int minimum, int maximum) {
+            object value = Data.Get(Settings, key); long number = Data.Num(Settings, key);
+            Settings[key] = (value is int || value is long) && number >= minimum && number <= maximum ? (int)number : fallback;
         }
         internal List<object> Games { get { return (List<object>)State["games"]; } }
         internal static string NormalizeDownloadFolder(object value) {
@@ -83,11 +128,13 @@ namespace NexusM
             return State;
         }
         internal void Save() {
+            if (stateWriteBlocked) throw new IOException("The unreadable saved state could not be preserved. Check access to the app data folder before saving or queuing downloads.");
             State["schemaVersion"] = 1;
-            State["downloads"] = Downloads.Take(500).ToList();
             var next = StateFile + ".tmp";
-            File.WriteAllText(next, Data.Json.Serialize(State), new UTF8Encoding(false));
-            if (File.Exists(StateFile)) File.Replace(next, StateFile, null); else File.Move(next, StateFile);
+            byte[] bytes = new UTF8Encoding(false).GetBytes(Data.Json.Serialize(State));
+            using (var file = new FileStream(next, FileMode.Create, FileAccess.Write, FileShare.None)) { file.Write(bytes, 0, bytes.Length); file.Flush(true); }
+            if (File.Exists(StateFile)) File.Replace(next, StateFile, restoredBackup ? null : BackupFile); else File.Move(next, StateFile);
+            restoredBackup = false;
         }
     }
 }

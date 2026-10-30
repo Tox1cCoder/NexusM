@@ -188,6 +188,7 @@ namespace NexusM
 
         private static async Task ReopenPendingAuthorization() {
             using (var fixture = new Fixture("reopen-pending", 1)) {
+                fixture.Store.Settings["maxParallelDownloads"] = 1;
                 await fixture.Controller.StartBatchDownload(Mods(1), fixture.Authorize);
                 int requests = fixture.Server.Requests.Count;
                 var transfers = (Dictionary<string, CancellationTokenSource>)typeof(Controller).GetField("transfers", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(fixture.Controller);

@@ -25,13 +25,13 @@ namespace NexusM
         private readonly Dictionary<string, CancellationTokenSource> transfers = new Dictionary<string, CancellationTokenSource>();
         private readonly Dictionary<string, object> details = new Dictionary<string, object>();
         private readonly HashSet<string> pending = new HashSet<string>();
-        internal Controller(MainForm form, Storage storage) { window = form; Store = storage; ResetApi(); }
+        internal Controller(MainForm form, Storage storage) { window = form; Store = storage; ResetApi(); RecoverCompletedDownloads(); }
         private void ResetApi() {
             string key = Store.ReadKey();
             if (Api != null) Api.Dispose();
             if (downloader != null) downloader.Dispose();
             Api = key.Length == 0 ? null : new NexusApi(key);
-            downloader = Api == null ? null : new DownloadService(Api, DownloadProgress);
+            downloader = Api == null ? null : new DownloadService(Api, DownloadProgress, QueueOptions());
         }
         private void RequireApi() { if (Api == null) throw new InvalidOperationException("Add your personal Nexus API key in Settings."); }
         internal async Task<object> Handle(string action, object payload) {
@@ -39,21 +39,38 @@ namespace NexusM
             if (action == "getState") return Store.PublicState();
             if (action == "initialize") { await Initialize(); return Store.PublicState(); }
             if (action == "saveSettings") {
+                if (changingSettings) throw new InvalidOperationException("Wait for the current settings change to finish.");
+                ValidateQueueSettings(p);
+                bool transportChanged = TransportSettingKeys.Any(key => p.ContainsKey(key) && Data.Num(p, key) != Data.Num(Store.Settings, key));
+                bool accountChanged = p.ContainsKey("apiKey") && !String.IsNullOrWhiteSpace(Data.Str(p, "apiKey"));
+                if ((transportChanged || accountChanged) && (transfers.Count > 0 || pending.Count > 0)) throw new InvalidOperationException("Finish or cancel pending downloads before changing your account, concurrency, retries, or timeouts.");
                 string folder = null;
                 if (p.ContainsKey("downloadFolder")) { RequireFolderAvailable(); folder = Storage.NormalizeDownloadFolder(p["downloadFolder"]); }
                 if (p.ContainsKey("yourGamesOnly") && !(p["yourGamesOnly"] is bool)) throw new ArgumentException("Your games filter must be enabled or disabled.");
-                if (p.ContainsKey("apiKey") && !String.IsNullOrWhiteSpace(Data.Str(p, "apiKey"))) {
-                    if (transfers.Count > 0) throw new InvalidOperationException("Finish or cancel active downloads before changing your API key.");
-                    string key = Data.Str(p, "apiKey").Trim();
-                    using (var candidate = new NexusApi(key)) { await candidate.ValidateAsync(); }
-                    if (initializationTask != null) await initializationTask;
-                    if (refreshTask != null) await refreshTask;
-                    if (downloadUpdatesTask != null) await downloadUpdatesTask;
-                    Store.WriteKey(key); ResetApi(); initialized = false; initializationTask = null; await Connect();
+                changingSettings = true;
+                try {
+                    if (accountChanged) {
+                        string key = Data.Str(p, "apiKey").Trim();
+                        using (var candidate = new NexusApi(key)) { await candidate.ValidateAsync(); }
+                        if (initializationTask != null) await initializationTask;
+                        if (refreshTask != null) await refreshTask;
+                        if (downloadUpdatesTask != null) await downloadUpdatesTask;
+                        lifetime.Token.ThrowIfCancellationRequested();
+                        if (transfers.Count > 0) throw new InvalidOperationException("Finish or cancel active downloads before changing your API key.");
+                        Store.WriteKey(key); ResetApi(); initialized = false; initializationTask = null; await Connect();
+                    }
+                    if (folder != null) { RequireFolderAvailable(); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
+                    if (p.ContainsKey("yourGamesOnly")) Store.Settings["yourGamesOnly"] = (bool)p["yourGamesOnly"];
+                    foreach (string key in TransportSettingKeys) if (p.ContainsKey(key)) Store.Settings[key] = (int)Data.Num(p, key);
+                    if (p.ContainsKey("resumeDownloadsOnStartup")) Store.Settings["resumeDownloadsOnStartup"] = p["resumeDownloadsOnStartup"];
+                    if (transportChanged && Api != null) { if (downloader != null) downloader.Dispose(); downloader = new DownloadService(Api, DownloadProgress, QueueOptions()); }
+                    Store.Save();
                 }
-                if (folder != null) { RequireFolderAvailable(); Directory.CreateDirectory(folder); Store.Settings["downloadFolder"] = folder; }
-                if (p.ContainsKey("yourGamesOnly")) Store.Settings["yourGamesOnly"] = (bool)p["yourGamesOnly"];
-                Store.Save(); Emit(); return Store.PublicState();
+                finally {
+                    changingSettings = false;
+                    if (!disposed) { ResumePendingDownloads(); window.NextAuthorization(); }
+                }
+                Emit(); return Store.PublicState();
             }
             if (action == "browseFolder") {
                 RequireFolderAvailable();
@@ -74,7 +91,11 @@ namespace NexusM
             if (action == "removeMod") { Store.Mods.RemoveAll(x => Data.Str(x, "gameDomain") == Data.Str(p, "gameDomain") && Data.Num(x, "modId") == Data.Num(p, "modId")); Store.Save(); Emit(); return Store.PublicState(); }
             if (action == "refresh") {
                 if (initializationTask != null && !initializationTask.IsCompleted) await initializationTask;
-                else await Refresh(Data.Str(p, "gameDomain"));
+                else {
+                    if (!Data.Bool(Store.State, "connected") && Api != null && Store.Downloads.Any(row => Data.Bool(row, "resumeOnStartup") && Data.Str(row, "status") == "interrupted")) await Connect();
+                    ResumePendingDownloads();
+                    await Refresh(Data.Str(p, "gameDomain"));
+                }
                 Emit(); return Store.PublicState();
             }
             if (action == "getModDetails") return await Details(Data.Str(p, "gameDomain"), Data.Num(p, "modId"));
@@ -91,9 +112,13 @@ namespace NexusM
             if (action == "cancelDownload") {
                 string id = Data.Str(p, "id");
                 CancelDownloadReplacement(id);
+                var row = Store.Downloads.Select(Data.Map).FirstOrDefault(x => Data.Str(x, "id") == id);
+                if (row != null) {
+                    row["resumeOnStartup"] = false; row["status"] = "cancelled"; row["error"] = "Download cancelled. The partial file is kept for a manual retry."; row["errorCode"] = "user_cancelled"; row["speed"] = 0L;
+                    QueueEvent(row, "cancelled", "Cancelled by you. The saved partial file is retained for a manual retry."); Store.Save();
+                }
                 CancellationTokenSource cancel; if (transfers.TryGetValue(id, out cancel)) cancel.Cancel();
-                var row = Store.Downloads.FirstOrDefault(x => Data.Str(x, "id") == id);
-                if (row != null && !transfers.ContainsKey(id)) { Data.Map(row)["status"] = "cancelled"; pending.Remove(id); window.CancelAuthorization(id); Store.Save(); Emit(); }
+                pending.Remove(id); window.CancelAuthorization(id); Emit(); window.NextAuthorization();
                 return Store.PublicState();
             }
             if (action == "clearDownloads") {
@@ -119,6 +144,7 @@ namespace NexusM
                 RequireFolderAvailable();
                 var row = Store.Downloads.FirstOrDefault(x => Data.Str(x, "id") == Data.Str(p, "id"));
                 if (row == null) throw new ArgumentException("That download is no longer in the queue.");
+                CheckRetryWindow(row);
                 await AuthorizeDownload(Data.Str(row, "gameDomain"), Data.Num(row, "modId"), Data.Num(row, "fileId")); return Store.PublicState();
             }
             if (action == "openFolder") {
@@ -215,6 +241,7 @@ namespace NexusM
             RequireApi(); var account = Data.Map(await Api.ValidateAsync(lifetime.Token));
             Store.State["user"] = Data.Obj("name", Data.Str(account, "name"), "isPremium", Data.Bool(account, "is_premium"), "id", Data.Num(account, "user_id"));
             Store.State["connected"] = true; Store.State.Remove("notice");
+            ResumePendingDownloads();
         }
         internal async Task SyncGames() {
             RequireApi();
@@ -464,6 +491,7 @@ namespace NexusM
         private async Task AuthorizeDownload(string domain, long modId, long fileId) {
             RequireFolderAvailable(); RequireApi(); domain = JsonTools.Domain(domain); if (modId <= 0 || fileId <= 0) throw new ArgumentException("Choose a mod file first.");
             string id = domain + ":" + modId + ":" + fileId;
+            CheckRetryWindow(Store.Downloads.FirstOrDefault(row => Data.Str(row, "id") == id));
             if (transfers.ContainsKey(id)) throw new InvalidOperationException("This file is already downloading.");
             if (pending.Contains(id)) {
                 window.OpenAuthorization("https://www.nexusmods.com/" + domain + "/mods/" + modId + "?tab=files&file_id=" + fileId + "&nmm=1", id);
@@ -478,39 +506,63 @@ namespace NexusM
         }
         internal async Task ReceiveNxm(string uri) {
             RequireFolderAvailable(); RequireApi(); var request = DownloadRequest.ParseNxm(uri, Folder); string id = request.Id;
+            CheckRetryWindow(Store.Downloads.FirstOrDefault(item => Data.Str(item, "id") == id));
             if (transfers.ContainsKey(id)) return;
-            Directory.CreateDirectory(Folder);
-            var cancellation = new CancellationTokenSource(); transfers[id] = cancellation; pending.Remove(id);
+            object previous = Store.Downloads.FirstOrDefault(item => Data.Str(item, "id") == id); int previousIndex = previous == null ? 0 : Store.Downloads.IndexOf(previous);
+            var row = previous == null ? Data.Obj("id", id, "gameDomain", request.Domain, "modId", request.ModId, "fileId", request.FileId, "name", "File " + request.FileId, "queuedAt", Data.Now(), "queueOrder", NextQueueOrder()) : new Dictionary<string, object>(Data.Map(previous));
+            string downloadFolder = Storage.NormalizeDownloadFolder(Data.Str(previous, "status") == "completed" ? Folder : Data.Get(row, "folder") ?? Folder);
+            row["folder"] = downloadFolder; row["status"] = changingSettings ? "interrupted" : "queued"; row["resumeOnStartup"] = true; row["error"] = ""; row["errorCode"] = "";
+            QueueEvent(row, changingSettings ? "settings_wait" : "authorized", changingSettings ? "Saved while settings are changing. Fresh authorization will be requested when the connection is ready." : "Nexus authorization received. Waiting for a transfer slot.");
+            PersistQueueAdmission(row, previous, previousIndex); pending.Remove(id); Emit();
+            if (changingSettings) return;
+            var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); transfers[id] = cancellation; pending.Remove(id);
+            window.NextAuthorization();
             try {
-                object result = await downloader.DownloadNxmAsync(uri, Folder, cancellation.Token);
+                Directory.CreateDirectory(downloadFolder);
+                object result = await downloader.DownloadNxmAsync(uri, downloadFolder, cancellation.Token);
+                if (disposed) return;
                 var final = Data.Map(result);
-                Store.Downloads.RemoveAll(x => Data.Str(x, "id") == id); Store.Downloads.Insert(0, final);
-                var fileHistory = Data.Map(Data.Get(Store.State, "fileDownloads")); fileHistory[id] = new Dictionary<string, object>(final); Store.State["fileDownloads"] = fileHistory;
-                CompleteDownloadReplacement(final);
+                foreach (var pair in final) row[pair.Key] = pair.Value;
+                row["resumeOnStartup"] = false;
+                var fileHistory = Data.Map(Data.Get(Store.State, "fileDownloads")); fileHistory[id] = new Dictionary<string, object>(row); Store.State["fileDownloads"] = fileHistory;
+                CompleteDownloadReplacement(row);
                 PruneDownloadedUpdates();
                 var mod = FindMod(request.Domain, request.ModId);
                 if (mod == null) { try { await RefreshOne(request.Domain, request.ModId); mod = FindMod(request.Domain, request.ModId); } catch { } }
                 if (mod != null) { mod["lastDownloadedAt"] = Data.Now(); mod["needsReview"] = Data.Num(mod, "updatedAt") > Data.Now(); }
-                details.Remove(request.Domain + ":" + request.ModId); Store.Save(); Emit();
-            } catch (OperationCanceledException) { CancelDownloadReplacement(id); Store.Save(); Emit(); }
-            catch (Exception ex) { CancelDownloadReplacement(id); Store.State["notice"] = ex.Message; Store.Save(); Emit(); }
+                details.Remove(request.Domain + ":" + request.ModId); if (SaveQueueState(row)) DownloadService.AcknowledgeCompletion(row); Emit();
+            } catch (OperationCanceledException) { if (!disposed) { CancelDownloadReplacement(id); SaveQueueState(row); Emit(); } }
+            catch (Exception ex) { if (!disposed) { CancelDownloadReplacement(id); row["status"] = "failed"; row["resumeOnStartup"] = false; row["error"] = QueueMessage(ex.Message); row["speed"] = 0L; if (Data.Str(row, "errorCode").Length == 0) row["errorCode"] = "download_failed"; QueueEvent(row, "failed", Data.Str(row, "error")); Store.State["notice"] = Data.Str(row, "error"); SaveQueueState(row); Emit(); } }
             finally { transfers.Remove(id); cancellation.Dispose(); window.NextAuthorization(); }
         }
         internal void AuthorizationStatus(string id, string message, bool needsUser) {
+            if (disposed) return;
             var row = Store.Downloads.Select(Data.Map).FirstOrDefault(x => Data.Str(x, "id") == id);
             if (row == null || Data.Str(row, "status") != "waiting-authorization") return;
+            message = QueueMessage(message);
             if (Data.Str(row, "authorizationMessage") == message && Data.Bool(row, "needsUser") == needsUser) return;
-            row["authorizationMessage"] = message; row["needsUser"] = needsUser; Emit();
+            bool attentionChanged = Data.Bool(row, "needsUser") != needsUser;
+            row["authorizationMessage"] = message; row["needsUser"] = needsUser;
+            if (attentionChanged) QueueEvent(row, needsUser ? "attention_required" : "authorizing", message);
+            if (attentionChanged || Data.Now() - lastQueueCheckpoint >= 5) { SaveQueueState(row); lastQueueCheckpoint = Data.Now(); }
+            Emit();
         }
         private void DownloadProgress(object value) {
             window.OnUi(delegate {
+                if (disposed) return;
                 var update = Data.Map(value); string id = Data.Str(update, "id");
                 var row = Store.Downloads.Select(Data.Map).FirstOrDefault(x => Data.Str(x, "id") == id);
                 if (row == null) { row = new Dictionary<string, object>(); Store.Downloads.Insert(0, row); }
+                string previous = Data.Str(row, "status"); long attempt = Data.Num(row, "attempt");
+                if (previous == "cancelled" && !Data.Bool(row, "resumeOnStartup") && Data.Str(update, "status") != "cancelled" && Data.Str(update, "status") != "completed") return;
                 foreach (var pair in update) row[pair.Key] = pair.Value;
+                row["error"] = QueueMessage(Data.Str(row, "error"));
                 row["bytes"] = Data.Num(update, "downloadedBytes"); row["total"] = Data.Num(update, "totalBytes");
+                string status = Data.Str(row, "status");
+                if (new[] { "completed", "failed", "cancelled", "canceled" }.Contains(status)) row["resumeOnStartup"] = false;
+                if (status != previous || Data.Num(row, "attempt") != attempt) QueueEvent(row, status, status == "retrying" || status == "failed" ? Data.Str(row, "error") : "Download " + status + (Data.Num(row, "attempt") > 0 ? " (attempt " + Data.Num(row, "attempt") + ")." : "."));
                 window.Emit("download", row);
-                if (Data.Str(row, "status") != "downloading") { Store.Save(); Emit(); }
+                if (status != "downloading" || Data.Now() - lastQueueCheckpoint >= 5) { SaveQueueState(row); lastQueueCheckpoint = Data.Now(); if (status != "downloading") Emit(); }
             });
         }
         private void RestoreDownload(object value) {
@@ -519,9 +571,16 @@ namespace NexusM
             string id = domain + ":" + modId + ":" + fileId;
             string status = Data.Str(value, "status");
             if (!new[] { "completed", "failed", "cancelled", "interrupted" }.Contains(status)) status = "interrupted";
-            var row = Data.Obj("id", id, "gameDomain", domain, "modId", modId, "fileId", fileId, "name", Data.Str(value, "name"), "filename", Data.Str(value, "filename"), "status", status, "downloadedBytes", Data.Num(value, "downloadedBytes"), "totalBytes", Data.Num(value, "totalBytes"), "path", Data.Str(value, "path"), "version", Data.Str(value, "version"), "downloadedAt", Data.Num(value, "downloadedAt"), "error", Data.Str(value, "error"));
+            var row = Data.Obj("id", id, "gameDomain", domain, "modId", modId, "fileId", fileId, "name", Data.Str(value, "name"), "filename", Data.Str(value, "filename"), "status", status, "downloadedBytes", Data.Num(value, "downloadedBytes"), "totalBytes", Data.Num(value, "totalBytes"), "path", Data.Str(value, "path"), "version", Data.Str(value, "version"), "downloadedAt", Data.Num(value, "downloadedAt"), "error", QueueMessage(Data.Str(value, "error")), "errorCode", QueueMessage(Data.Str(value, "errorCode")));
             foreach (string field in new[] { "fileLength", "fileCreatedUtcTicks", "fileModifiedUtcTicks" })
                 if (Data.Map(value).ContainsKey(field)) row[field] = Data.Num(value, field);
+            string folder; try { folder = Storage.NormalizeDownloadFolder(Data.Get(value, "folder")); } catch (ArgumentException) { folder = status == "completed" && Data.Str(value, "path").Length > 0 ? Path.GetDirectoryName(Data.Str(value, "path")) : Folder; }
+            row["folder"] = folder; row["queuedAt"] = Data.Num(value, "queuedAt") > 0 ? Data.Num(value, "queuedAt") : Data.Now(); row["queueOrder"] = Data.Num(value, "queueOrder") > 0 ? Data.Num(value, "queueOrder") : NextQueueOrder();
+            row["resumeOnStartup"] = status == "interrupted" && (!(Data.Get(value, "resumeOnStartup") is bool) || Data.Bool(value, "resumeOnStartup"));
+            row["attempt"] = Math.Max(0, Data.Num(value, "attempt")); row["maxAttempts"] = Math.Max(0, Data.Num(value, "maxAttempts")); row["speed"] = 0L;
+            row["retryAt"] = new[] { "rate-limited", "server-error" }.Contains(Data.Str(row, "errorCode")) && Data.Num(value, "retryAt") > Data.Now() ? Data.Num(value, "retryAt") : 0L;
+            var savedEvents = Data.List(Data.Get(value, "events"));
+            row["events"] = savedEvents.Skip(Math.Max(0, savedEvents.Count - 40)).Select(item => Data.Obj("time", Data.Num(item, "time"), "code", QueueMessage(Data.Str(item, "code")), "message", QueueMessage(Data.Str(item, "message")))).Cast<object>().ToList();
             if (!Store.Downloads.Any(x => Data.Str(x, "id") == id)) Store.Downloads.Add(row);
             if (status == "completed") { var fileHistory = Data.Map(Data.Get(Store.State, "fileDownloads")); if (Data.Num(Data.Get(fileHistory, id), "downloadedAt") <= Data.Num(row, "downloadedAt")) fileHistory[id] = row; Store.State["fileDownloads"] = fileHistory; }
         }
@@ -533,10 +592,22 @@ namespace NexusM
         private void Emit() { window.Emit("state", Store.PublicState()); }
         public void Dispose() {
             if (disposed) return;
-            disposed = true; lifetime.Cancel();
-            foreach (var token in transfers.Values) token.Cancel();
-            if (downloader != null) downloader.Dispose(); if (Api != null) Api.Dispose();
-            Store.State.Remove("refreshProgress"); Store.Save();
+            disposed = true;
+            foreach (var row in Store.Downloads.Select(Data.Map)) {
+                string status = Data.Str(row, "status");
+                if (new[] { "queued", "authorizing", "downloading", "retrying", "waiting-authorization" }.Contains(status)) {
+                    row["status"] = "interrupted"; row["resumeOnStartup"] = true; row["speed"] = 0L;
+                    if (!new[] { "rate-limited", "server-error" }.Contains(Data.Str(row, "errorCode")) || Data.Num(row, "retryAt") <= Data.Now()) { row["retryAt"] = 0L; row["errorCode"] = "app_closed"; }
+                    row["error"] = "Saved for recovery when NexusM opens again."; QueueEvent(row, "app_closed", "App closed; this unfinished download is saved for recovery.");
+                }
+            }
+            Store.State.Remove("refreshProgress");
+            try { SaveQueueState(Store.Downloads.Select(Data.Map).FirstOrDefault() ?? new Dictionary<string, object>()); }
+            finally {
+                lifetime.Cancel();
+                foreach (var token in transfers.Values) token.Cancel();
+                if (downloader != null) downloader.Dispose(); if (Api != null) Api.Dispose();
+            }
         }
     }
 }
