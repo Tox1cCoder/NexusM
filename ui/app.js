@@ -60,6 +60,7 @@
       else if(msg.data?.id){
         const i=state.downloads.findIndex(d=>String(d.id)===String(msg.data.id));
         state.downloads=i>=0?state.downloads.map((d,index)=>index===i?{...d,...msg.data}:d):[msg.data,...state.downloads];
+        downloadsSignature=JSON.stringify([state.downloads,state.downloadUpdates]);
         renderDownloads();renderCounts();refreshFileDownloadFlags();
       }
     }
@@ -253,9 +254,12 @@
   function renderCounts(){
     $('#library-count').textContent=libraryMods().length;
     $('#game-count').textContent=state.games.length;
-    const active=state.downloads.filter(d=>!['completed','failed','cancelled','canceled','interrupted'].includes(d.status)).length;
+    const completed=state.downloads.filter(d=>d.status==='completed').length;
+    const active=state.downloads.filter(d=>queuedStatuses.has(d.status||'queued')).length;
     const downloads=$('#download-count'),total=state.downloads.length;
-    downloads.textContent=total;downloads.title=`${total} ${total===1?'download':'downloads'}, ${active} active`;
+    const summary=`${completed} downloaded, ${active} active, ${total} ${total===1?'entry':'entries'}`;
+    downloads.textContent=completed;downloads.title=summary;
+    if($('#downloads-summary').textContent!==summary)$('#downloads-summary').textContent=summary;
     const name=state.user?.name || state.user?.username;
     setHtml('#account',`<span class="avatar">${esc(name?shortName(name):'N')}</span><div><strong>${esc(name || 'Not connected')}</strong><small>${name?(state.user.isPremium?'Premium account':'Free account'):'Connect your Nexus account'}</small></div><button class="icon-button" data-page="settings" aria-label="Account settings">${icon('settings')}</button>`);
   }

@@ -44,6 +44,8 @@ New mods downloaded outside NexusM need another history import or **Add mod**. U
 
 Downloads run one at a time. Cancelling a download or closing the app keeps its partial file. **Retry** gets fresh authorization and resumes when the server supports it. Existing completed archives are not overwritten.
 
+The Downloads badge counts completed archives in the current list; the page summary shows downloaded, active, and total entries.
+
 While a completed archive remains in **Downloads**, NexusM checks for newer versions at startup, with **Check for updates**, and every 30 minutes while the app is open. A popup shows the old and new filenames and versions. Matching uses Nexus mod/file IDs and the author's file-update links, so changed archive names are supported.
 
 - **Replace** downloads the newer file through the normal Nexus flow, then permanently deletes the recorded old archive after the new download succeeds. Failed or cancelled downloads keep the old file.

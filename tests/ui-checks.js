@@ -606,26 +606,67 @@
         $('[data-detail-tab="requirements"]').click();expect($('#detail-tab-body').innerText.includes('Required framework'),'Requirement missing.');
       });
       $('#detail-close').click();
-      await check('interrupted downloads remain counted and offer retry',()=>{
+      await check('interrupted downloads remain visible without increasing the downloaded count',()=>{
         window.NexusM.navigate('downloads');
         expect($('[data-retry-download="interrupted-fixture"]'),'Interrupted download needs a Retry control.');
-        expect($('#download-count').textContent==='1'&&$('#download-count').title==='1 download, 0 active','The badge should count visible entries and distinguish inactive downloads.');
+        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 0 active, 1 entry','An interrupted entry must not count as downloaded.');
+        expect($('#downloads-summary').textContent==='0 downloaded, 0 active, 1 entry','The visible summary should distinguish downloaded files from list entries.');
       });
       await check('download count follows queue events, completion, retries, and clearing',()=>{
         const record={id:'live-count-fixture',name:'Live count archive',status:'queued'};
         window.NexusM.receive({event:'download',data:record});
-        expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloads, 1 active','A new queued entry should immediately increase the total.');
+        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 1 active, 2 entries','Queuing a file should increase active entries without counting it as downloaded.');
+        expect($('#downloads-summary').textContent==='0 downloaded, 1 active, 2 entries','The summary should immediately reflect a queued entry.');
         window.NexusM.receive({event:'downloadProgress',data:{id:record.id,status:'downloading',bytes:1024,total:4096}});
-        expect($('#download-count').textContent==='2'&&$$('#downloads-list .download-card').length===2,'Progress should update the existing entry without counting it twice.');
+        expect($('#download-count').textContent==='0'&&$$('#downloads-list .download-card').length===2,'Progress should update the existing entry without counting it as downloaded or adding a duplicate.');
         for(const status of ['completed','failed','cancelled']){
           window.NexusM.receive({event:'download',data:{id:record.id,status}});
-          expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloads, 0 active',`A ${status} entry should remain counted while it stays in the list.`);
+          const count=status==='completed'?1:0,summary=`${count} downloaded, 0 active, 2 entries`;
+          expect($('#download-count').textContent===String(count)&&$('#download-count').title===summary,`Only completed entries should count as downloaded after a ${status} event.`);
+          expect($('#downloads-summary').textContent===summary&&$$('#downloads-list .download-card').length===2,'Status changes should update the summary while keeping both entries visible.');
         }
         window.NexusM.receive({event:'download',data:{id:record.id,status:'waiting-authorization'}});
-        expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloads, 1 active','Retrying an entry should update its active status without increasing the total.');
+        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 1 active, 2 entries','Retrying an entry should update its active status without counting it as downloaded.');
         window.NexusM.receive({event:'download',data:{downloads:[]}});
-        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloads, 0 active'&&!$$('#downloads-list .download-card').length,'An empty replacement list should reset the count immediately.');
+        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 0 active, 0 entries'&&!$$('#downloads-list .download-card').length,'An empty replacement list should reset the count immediately.');
+        expect($('#downloads-summary').textContent==='0 downloaded, 0 active, 0 entries','Clearing the list should reset the visible summary.');
         window.NexusM.setState(fixture);
+      });
+      await check('download counts separate completed files, active transfers, and all entries',()=>{
+        const statuses=['completed','completed','queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization','failed','cancelled','canceled','interrupted','unknown'];
+        try{
+          window.NexusM.setState({downloads:statuses.map((status,index)=>({id:`mixed-count-${index}`,name:`Count fixture ${index}`,status}))});
+          expect($('#download-count').textContent==='2'&&$('#download-count').title==='2 downloaded, 8 active, 15 entries','Only completed rows should count as downloaded, and only known queue statuses should count as active.');
+          expect($('#downloads-summary').textContent==='2 downloaded, 8 active, 15 entries','The visible summary must show the same completed, active, and total counts.');
+          expect($$('#downloads-list .download-card').length===15,'Pending, failed, cancelled, interrupted, and unknown entries must stay visible.');
+        }finally{window.NexusM.setState(fixture);}
+      });
+      await check('empty download snapshots remove cards added by individual events',()=>{
+        try{
+          for(const event of ['download','downloadProgress']){
+            window.NexusM.setState({downloads:[]});
+            window.NexusM.receive({event,data:{id:'snapshot-added-fixture',name:'Snapshot archive',status:event==='download'?'queued':'downloading',bytes:1024,total:4096}});
+            expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 1 active, 1 entry'&&$$('#downloads-list .download-card').length===1,`${event} should add one active entry without marking it downloaded.`);
+            window.NexusM.setState({downloads:[]});
+            expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 0 active, 0 entries'&&!$$('#downloads-list .download-card').length,`Restoring an empty snapshot after ${event} must remove the event's card and active count.`);
+            expect($('#downloads-summary').textContent==='0 downloaded, 0 active, 0 entries','Restoring an empty snapshot must also reset its visible summary.');
+          }
+        }finally{window.NexusM.setState(fixture);}
+      });
+      await check('completed download snapshots restore cards changed by individual events',()=>{
+        const completed={id:'snapshot-completed-fixture',name:'Completed snapshot archive',status:'completed',bytes:4096,total:4096};
+        try{
+          for(const status of ['failed','retrying']){
+            window.NexusM.setState({downloads:[completed]});
+            window.NexusM.receive({event:'download',data:{id:completed.id,status,error:'Temporary transfer error'}});
+            expect($('#download-count').textContent==='0'&&$('.download-status').textContent===(status==='failed'?'Failed':'Resuming'),'The individual event should update the displayed status and remove the completed count.');
+            window.NexusM.setState({downloads:[completed]});
+            expect($('#download-count').textContent==='1'&&$('#download-count').title==='1 downloaded, 0 active, 1 entry'&&$$('#downloads-list .download-card').length===1,'Restoring a completed snapshot must restore exactly one downloaded entry.');
+            expect($('#downloads-summary').textContent==='1 downloaded, 0 active, 1 entry','Restoring a completed snapshot must update the visible summary.');
+            expect($('.download-status').textContent==='Downloaded'&&$(`[data-download-folder="${completed.id}"]`),'The completed snapshot must restore the downloaded status and folder control.');
+            expect(!$('#downloads-list').textContent.includes('Temporary transfer error'),'Restoring a completed snapshot must remove the event error.');
+          }
+        }finally{window.NexusM.setState(fixture);}
       });
       await check('authorization preparation and user attention have distinct statuses',()=>{
         window.NexusM.setState({downloads:[{id:'preparing-fixture',gameDomain:'game1',name:'Preparing archive',status:'waiting-authorization',needsUser:false,authorizationMessage:'Waiting for the Nexus countdown.'},{id:'attention-fixture',gameDomain:'game1',name:'Attention archive',status:'waiting-authorization',needsUser:true,authorizationMessage:'Sign in to Nexus to continue.'}]});
@@ -645,7 +686,8 @@
         expect(requests.some(r=>r.action==='clearDownloads'),'Clear list did not request the host action.');
         expect($$('#downloads-list .download-card').length===2&&$('#downloads-list').innerText.includes('Active archive')&&$('#downloads-list').innerText.includes('Queued archive'),'Active and queued transfers should remain visible.');
         expect($('#clear-downloads-button').disabled,'Clear list should be disabled with only active transfers.');
-        expect($('#download-count').textContent==='2','Remaining transfers should still count as active.');
+        expect($('#download-count').textContent==='0'&&$('#download-count').title==='0 downloaded, 2 active, 2 entries','Remaining active transfers must not count as downloaded.');
+        expect($('#downloads-summary').textContent==='0 downloaded, 2 active, 2 entries','The summary should show only the active entries retained by Clear list.');
       });
       await check('Clear download folder waits for idle transfers and remains available with an empty list',()=>{
         window.NexusM.navigate('downloads');
