@@ -42,9 +42,15 @@ New mods downloaded outside NexusM need another history import or **Add mod**. U
 3. NexusM opens the website's normal download flow and handles its free-download controls and countdown. Sign in, choose cookie preferences, or complete a browser check if a Nexus window needs your attention.
 4. Follow progress under **Downloads**. Use the folder button beside a completed download to highlight its archive in File Explorer, then install it using the author's instructions or your mod manager. **Open download folder** opens your configured download location.
 
-Downloads run one at a time. Cancelling a download or closing the app keeps its partial file. **Retry** gets fresh authorization and resumes when the server supports it. Existing completed archives are not overwritten.
+Downloads run in parallel, with two transfers by default. Under **Settings → Download queue**, choose one to four parallel transfers, automatic retries, retry delay, network timeout, and whether unfinished downloads resume when the app opens.
+
+Every accepted file is saved in the queue before authorization or transfer starts. Closing the app or replacing it with a newer version keeps unfinished jobs and their original folders. With automatic recovery enabled, connecting to Nexus requests fresh authorization and resumes those jobs in queue order. Sign in or complete a browser check if prompted. A verified partial file resumes when the server supports it; otherwise the transfer restarts safely. Existing completed archives are not overwritten.
+
+Temporary connection errors, timeouts, server failures, and rate limits receive bounded retries. Failed or timed-out jobs stay in **Downloads** with a **Retry** button while other jobs continue. Cancelling a job keeps its partial file and prevents automatic recovery of that job. **Download log** on each entry shows recent state changes, attempts, recovery, and error codes. API keys and signed download links are excluded from these diagnostics.
 
 The Downloads badge counts completed archives in the current list; the page summary shows downloaded, active, and total entries.
+
+See [Download queue behavior and recovery](docs/download-queue.md) for configuration defaults, restart behavior, failure handling, and verification details.
 
 While a completed archive remains in **Downloads**, NexusM checks for newer versions at startup, with **Check for updates**, and every 30 minutes while the app is open. A popup shows the old and new filenames and versions. Matching uses Nexus mod/file IDs and the author's file-update links, so changed archive names are supported.
 
@@ -93,6 +99,7 @@ NexusM stores app data under `%LOCALAPPDATA%\NexusM`. Paste that path into File 
 | --- | --- |
 | `api-key.bin` | Your API key, encrypted with Windows DPAPI for the current Windows account. |
 | `state.json` | Your local library, settings, and download records. This file is not encrypted. |
+| `state.json.bak` | The previous saved state, used to recover an unreadable state file. Unreadable originals are preserved separately for recovery. |
 | `WebView` | Embedded browser data, including the Nexus website sign-in session. |
 | Your chosen download folder | Completed archives and unfinished downloads with their small resume sidecars. |
 
@@ -132,6 +139,8 @@ After building, these suites use isolated fixtures and need no Nexus account. Th
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Backend.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryImport.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-QueueBrowser.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-QueueRestart.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-FolderCleanup.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ModBatch.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-BatchDownload.ps1

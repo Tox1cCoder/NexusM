@@ -9,6 +9,7 @@
   let refreshRequest = null;
   let folderClearRequest = null;
   let folderSaveRequest = null;
+  let queueSettingsRequest = null;
   let browseFolderResult = {cancelled:true};
   let batchDownloadRequest = null;
   let downloadUpdateRequest = null;
@@ -55,7 +56,7 @@
       'game1:2:11':{gameDomain:'game1',modId:2,fileId:11,status:'completed',downloadedAt:1792480000},
       'game2:1:11':{gameDomain:'game2',modId:1,fileId:11,status:'completed',downloadedAt:1792480000}
     },
-    settings:{hasApiKey:true,downloadFolder:'C:\\Downloads\\NexusM',yourGamesOnly:true},
+    settings:{hasApiKey:true,downloadFolder:'C:\\Downloads\\NexusM',yourGamesOnly:true,maxParallelDownloads:2,maxDownloadRetries:3,downloadTimeoutSeconds:90,retryDelaySeconds:2,resumeDownloadsOnStartup:true},
     user:{name:'UI fixture',isPremium:false},lastCheckedAt:1792500000,refreshProgress:{running:false}
   };
   const fakeDetails = {
@@ -105,6 +106,9 @@
         else if(message.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(message.payload,'downloadFolder')){
           requests.push(message);folderSaveRequest=message;
         }
+        else if(message.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(message.payload,'maxParallelDownloads')){
+          requests.push(message);queueSettingsRequest=message;
+        }
         else if(message.action==='browseFolder'){
           requests.push(message);
           queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:browseFolderResult}));
@@ -121,6 +125,10 @@
           requests.push(message);
           if(deferFileDownloads)fileDownloadRequests.set(String(message.id),message);
           else queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{}}));
+        }
+        else if(message.action==='retryDownload'){
+          requests.push(message);
+          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{}}));
         }
         else if(message.action==='openUrl'){
           requests.push(message);
@@ -678,6 +686,64 @@
         expect(!$('#clear-downloads-button').disabled,'A list containing only waiting downloads should still be clearable.');
         expect($('#page-downloads .notice').textContent.includes('countdown still applies'),'The download notice should retain the free-account countdown restriction.');
       });
+      await check('download retries and recovery expose bounded safe logs without losing disclosure or focus',()=>{
+        const retryAt=Math.floor(Date.now()/1000)+30;
+        const record={id:'queue-log-fixture',name:'Recoverable archive',status:'retrying',attempt:2,maxAttempts:4,retryAt,errorCode:'NETWORK_TIMEOUT',error:'The server did not send data in time.',bytes:1024,total:4096,events:Array.from({length:60},(_,i)=>({time:1792600000+i,code:i===59?'<img src=x onerror=alert(1)>':'RETRY',message:i===59?'<script>window.__queueInjected=true</script>':'Attempt '+i}))};
+        try{
+          window.NexusM.setState({downloads:[record]});
+          const card=$('.download-card'),log=$('.download-log'),summary=$('.download-log summary');
+          expect($('.download-attempt').textContent==='Attempt 2 of 4','Retry attempt totals should be visible.');
+          expect($('.download-retry-time').textContent.startsWith('Retrying in ')&&$('.download-retry-time').title,'A scheduled retry needs a countdown and its absolute time.');
+          expect($('.download-error-code').textContent==='NETWORK_TIMEOUT'&&$('.download-error').textContent.includes('in time'),'The current error and diagnostic code should be visible.');
+          expect($$('.download-log li').length===50&&summary.textContent.includes('50 latest'),'The UI should bound long imported logs to the latest events.');
+          expect(!$('.download-log img')&&!$('.download-log script')&&!window.__queueInjected,'Log text and codes must never become executable markup.');
+          window.NexusM.receive({event:'download',data:{id:record.id,events:[null,{time:1e40,code:'LEGACY',message:'Unknown event time'},{time:0,code:'RECOVERED',message:'Saved transfer'}]}});
+          expect($$('.download-log li').length===2&&!$('.download-log time'),'Malformed imported event timestamps should not break rendering or invent dates.');
+          log.open=true;summary.focus();
+          window.NexusM.receive({event:'downloadProgress',data:{id:record.id,status:'downloading',bytes:2048,speed:1024}});
+          expect($('.download-card')===card&&$('.download-log')===log&&log.open&&document.activeElement===summary,'Progress should preserve the card, open log, and keyboard focus.');
+          expect(!$('.download-retry-time')&&$('[role="progressbar"]').getAttribute('aria-valuenow')==='50','A resumed transfer should replace its retry countdown with current progress.');
+          window.NexusM.receive({event:'download',data:{id:record.id,status:'interrupted',resumeOnStartup:true,error:'Waiting for the Nexus connection.'}});
+          expect($('.download-recovery').textContent.includes('recovery when connected')&&$('[data-retry-download]'),'An interrupted recoverable transfer should retain its explanation and manual Retry control.');
+          window.NexusM.receive({event:'download',data:{id:record.id,status:'cancelled',resumeOnStartup:false}});
+          expect(!$('.download-recovery')&&$('.download-status').textContent==='Cancelled','Explicit cancellation must not look like automatic recovery.');
+        }finally{window.NexusM.setState(fixture);}
+      });
+      await check('server retry deadlines remain visible and release manual Retry without starting a download',async()=>{
+        const originalNow=Date.now,deadline=Math.floor(Date.now()/1000)+7200;
+        try{
+          window.NexusM.navigate('downloads');
+          const record={id:'retry-deadline-fixture',name:'Server pause archive',status:'failed',errorCode:'rate-limited',error:'The server requested a longer wait.',retryAt:deadline};
+          window.NexusM.setState({downloads:[record]});
+          expect($('.download-retry-available').textContent.startsWith('Retry available after ')&&$('.download-retry-available').title,'A failed long server pause must show its absolute retry deadline.');
+          let button=$('[data-retry-download]');const before=requests.filter(request=>request.action==='retryDownload').length;
+          expect(button.disabled,'Retry must remain disabled until the server deadline.');button.click();
+          expect(requests.filter(request=>request.action==='retryDownload').length===before,'A disabled Retry must not request another download.');
+          window.NexusM.setState({downloads:[{...record,status:'interrupted',resumeOnStartup:true}]});
+          button=$('[data-retry-download]');const log=$('.download-log'),summary=$('.download-log summary');log.open=true;summary.focus();
+          expect(button.disabled&&$('.download-retry-available').textContent.startsWith('Retry available after '),'Recovered interrupted jobs must retain their server deadline.');
+          Date.now=()=>(deadline+1)*1000;
+          await new Promise(resolve=>setTimeout(resolve,1100));
+          expect($('[data-retry-download]')===button&&!button.disabled&&$('.download-retry-available').textContent==='Retry available now','The timer must enable the existing Retry control when its deadline expires.');
+          expect(log.open&&document.activeElement===summary,'Expiry must preserve an open log and keyboard focus.');
+          expect(requests.filter(request=>request.action==='retryDownload').length===before,'Expiry must not initiate a download by itself.');
+          button.click();await settle();
+          expect(requests.filter(request=>request.action==='retryDownload').length===before+1,'Manual Retry should become available after the deadline.');
+        }finally{Date.now=originalNow;window.NexusM.setState(fixture);}
+      });
+      await check('automatic recovery preference updates saved-job guidance without losing its queue entry',()=>{
+        const record={id:'recovery-preference-fixture',name:'Saved queue archive',status:'interrupted',resumeOnStartup:true};
+        try{
+          window.NexusM.setState({downloads:[record],settings:{resumeDownloadsOnStartup:true}});
+          const card=$('.download-card');
+          expect($('.download-recovery').textContent==='Saved for recovery when connected.','Enabled recovery should explain how the saved job continues.');
+          window.NexusM.setState({settings:{resumeDownloadsOnStartup:false}});
+          expect($('.download-card')===card&&$('.download-recovery').textContent.includes('Automatic recovery is off')&&$('[data-retry-download]'),'Disabling recovery should retain the saved job and explain manual Retry.');
+          window.NexusM.setState({settings:{resumeDownloadsOnStartup:true}});
+          expect($('.download-card')===card&&$('.download-recovery').textContent==='Saved for recovery when connected.','Re-enabling recovery should immediately update saved-job guidance.');
+          expect($('#downloads-summary').textContent==='0 downloaded, 0 active, 1 entry','A recovery preference change must not alter queue counts.');
+        }finally{window.NexusM.setState(fixture);}
+      });
       await check('Clear list dispatches the action and keeps active downloads visible',async()=>{
         window.NexusM.setState({downloads:[...fixture.downloads,{id:'finished-fixture',name:'Finished archive',status:'completed'},{id:'waiting-fixture',name:'Waiting archive',status:'waiting-authorization'},{id:'active-fixture',name:'Active archive',status:'downloading',bytes:1024,total:4096},{id:'queued-fixture',name:'Queued archive',status:'queued'}]});
         expect(!$('#clear-downloads-button').disabled,'Clear list should be available for finished and waiting entries.');
@@ -775,6 +841,45 @@
         const opened=requests.filter(r=>r.action==='openUrl');
         expect(opened.length===before+1&&opened[opened.length-1].payload.url==='https://www.nexusmods.com/users/myaccount?tab=api','Clicking the link icon should request the Nexus API page in the external browser.');
         expect($('#page-settings').classList.contains('active')&&!$('#api-key').value,'Opening the website should keep Settings visible and the saved key out of the input.');
+      });
+      await check('queue settings preserve drafts, submit typed values once, and reflect saved settings',async()=>{
+        window.NexusM.setState({settings:fixture.settings});
+        const edit=(id,value)=>{const input=$(`#${id}`);if(input.type==='checkbox')input.checked=value;else input.value=String(value);input.dispatchEvent(new Event(input.type==='checkbox'?'change':'input',{bubbles:true}));};
+        expect($('#queue-parallel').value==='2'&&$('#queue-retries').value==='3'&&$('#queue-timeout').value==='90'&&$('#queue-retry-delay').value==='2'&&$('#queue-resume').checked,'The queue defaults should be visible.');
+        edit('queue-parallel',4);edit('queue-retries',5);edit('queue-timeout',120);edit('queue-retry-delay',3);edit('queue-resume',false);
+        window.NexusM.receive({event:'state',data:{settings:{...fixture.settings,cacheSizeMB:12}}});
+        window.NexusM.receive({event:'downloadProgress',data:{id:'queue-draft-progress',status:'downloading',bytes:1024,total:4096}});
+        window.NexusM.navigate('downloads');window.NexusM.navigate('settings');
+        expect($('#queue-parallel').value==='4'&&$('#queue-retries').value==='5'&&!$('#queue-resume').checked,'Unrelated state, progress, and navigation must preserve queue drafts.');
+        const before=requests.filter(r=>r.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(r.payload,'maxParallelDownloads')).length;
+        $('#save-queue-settings').click();$('#save-queue-settings').click();
+        expect(queueSettingsRequest&&requests.filter(r=>r.action==='saveSettings'&&Object.prototype.hasOwnProperty.call(r.payload,'maxParallelDownloads')).length===before+1,'A pending queue save must not submit twice.');
+        expect(JSON.stringify(queueSettingsRequest.payload)===JSON.stringify({maxParallelDownloads:4,maxDownloadRetries:5,downloadTimeoutSeconds:120,retryDelaySeconds:3,resumeDownloadsOnStartup:false}),'Queue numbers and boolean should have their expected host types.');
+        expect($('#save-queue-settings').disabled&&$('#download-queue-form').getAttribute('aria-busy')==='true','Saving queue settings should stay busy until the response.');
+        window.NexusM.receive({id:queueSettingsRequest.id,ok:true,result:{settings:{maxParallelDownloads:3,maxDownloadRetries:5,downloadTimeoutSeconds:120,retryDelaySeconds:3,resumeDownloadsOnStartup:false}}});queueSettingsRequest=null;await settle();
+        expect($('#queue-parallel').value==='3'&&!$('#save-queue-settings').disabled&&$('#queue-settings-result').textContent==='Queue settings saved.','Successful saves should show the returned settings and restore Save.');
+        window.NexusM.setState({settings:fixture.settings,downloads:fixture.downloads});
+        expect($('#queue-parallel').value==='2'&&$('#queue-resume').checked,'A successfully saved form should follow future stored settings again.');
+      });
+      await check('queue settings validate bounds and preserve newer edits or rejected saves',async()=>{
+        const edit=(id,value)=>{const input=$(`#${id}`);input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));};
+        const before=requests.length;
+        for(const [id,value,valid] of [['queue-parallel',5,2],['queue-parallel',1.5,2],['queue-retries',-1,3],['queue-retries',11,3],['queue-timeout',14,90],['queue-timeout',601,90],['queue-retry-delay',0,2],['queue-retry-delay',61,2]]){
+          edit(id,value);$('#save-queue-settings').click();
+          expect(!$(`#${id}`).checkValidity()&&!queueSettingsRequest,'Out-of-range or fractional queue settings must be rejected before host submission.');
+          edit(id,valid);
+        }
+        expect(requests.length===before,'Invalid queue settings should never reach the host.');
+        edit('queue-parallel',3);$('#save-queue-settings').click();const first=queueSettingsRequest;
+        edit('queue-parallel',4);
+        window.NexusM.receive({id:first.id,ok:true,result:{settings:{maxParallelDownloads:3}}});queueSettingsRequest=null;await settle();
+        expect($('#queue-parallel').value==='4','A reply for a previous queue draft must not erase a newer edit.');
+        $('#save-queue-settings').click();
+        window.NexusM.receive({id:queueSettingsRequest.id,ok:false,error:'Finish active downloads before changing queue settings.'});queueSettingsRequest=null;await settle();
+        window.NexusM.receive({event:'state',data:{settings:fixture.settings}});
+        expect($('#queue-parallel').value==='4'&&!$('#save-queue-settings').disabled&&$('#queue-settings-result').getAttribute('role')==='alert'&&$('#queue-settings-result').textContent.includes('Finish active'),'Rejected queue saves should retain edits and expose their actionable error.');
+        edit('queue-parallel',2);$('#save-queue-settings').click();
+        window.NexusM.receive({id:queueSettingsRequest.id,ok:true,result:{settings:fixture.settings}});queueSettingsRequest=null;await settle();
       });
       await check('typed download folder survives live state updates and saves without an added subfolder',async()=>{
         window.NexusM.setState({settings:fixture.settings});
@@ -945,6 +1050,7 @@
       if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderSaveRequest)window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'UI fixture ended.'});
+      if(queueSettingsRequest)window.NexusM.receive({id:queueSettingsRequest.id,ok:false,error:'UI fixture ended.'});
       if(batchDownloadRequest)window.NexusM.receive({id:batchDownloadRequest.id,ok:false,error:'UI fixture ended.'});
       if(downloadUpdateRequest)window.NexusM.receive({id:downloadUpdateRequest.id,ok:false,error:'UI fixture ended.'});
       if(downloadUpdateCheckRequest)window.NexusM.receive({id:downloadUpdateCheckRequest.id,ok:false,error:'UI fixture ended.'});

@@ -24,6 +24,8 @@
   let lastFocus = null, lastNotice = null;
   let loadingLibrary = false, refreshPromise = null;
   let downloadFolderDraft = null;
+  let queueSettingsDraft = null, queueSettingsRevision = 0, queueSettingsSaving = false;
+  const queueSettingFields = {maxParallelDownloads:['queue-parallel',2],maxDownloadRetries:['queue-retries',3],downloadTimeoutSeconds:['queue-timeout',90],retryDelaySeconds:['queue-retry-delay',2],resumeDownloadsOnStartup:['queue-resume',true]};
   let activeDownloadUpdate = null, downloadUpdateBusy = false, checkingDownloadUpdates = false;
   const shownDownloadUpdates = new Set();
   const renderedHtml=new WeakMap();
@@ -33,7 +35,8 @@
   const timeFormatter=new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit'});
   const dateTimeFormatter=new Intl.DateTimeFormat(undefined,{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
   const dateCells=new Map();
-  function setHtml(selector,html){const element=$(selector);if(renderedHtml.get(element)!==html){element.innerHTML=html;renderedHtml.set(element,html);}}
+  function setElementHtml(element,html){if(renderedHtml.get(element)!==html){element.innerHTML=html;renderedHtml.set(element,html);}}
+  function setHtml(selector,html){setElementHtml($(selector),html);}
 
   function rpc(action, payload = {}) {
     const bridge = window.chrome?.webview;
@@ -60,7 +63,7 @@
       else if(msg.data?.id){
         const i=state.downloads.findIndex(d=>String(d.id)===String(msg.data.id));
         state.downloads=i>=0?state.downloads.map((d,index)=>index===i?{...d,...msg.data}:d):[msg.data,...state.downloads];
-        downloadsSignature=JSON.stringify([state.downloads,state.downloadUpdates]);
+        downloadsSignature=JSON.stringify([state.downloads,state.downloadUpdates,state.settings.resumeDownloadsOnStartup!==false]);
         renderDownloads();renderCounts();refreshFileDownloadFlags();
       }
     }
@@ -124,7 +127,7 @@
     const gamesChanged=nextGames!==gamesSignature;
     const nextLibrary=JSON.stringify([nextGames,state.settings.yourGamesOnly,state.mods.map(mod=>[modDomain(mod),modId(mod),mod.name,mod.version,mod.author,mod.uploaded_by,picture(mod),timestamp(updated(mod)),timestamp(downloaded(mod)),needsReview(mod)])]);
     const libraryChanged=nextLibrary!==librarySignature;
-    const nextDownloads=JSON.stringify([state.downloads,state.downloadUpdates]),nextSettings=JSON.stringify([state.settings,state.user,state.clearingDownloadFolder]);
+    const nextDownloads=JSON.stringify([state.downloads,state.downloadUpdates,state.settings.resumeDownloadsOnStartup!==false]),nextSettings=JSON.stringify([state.settings,state.user,state.clearingDownloadFolder]);
     reconcileBatchSelection();
     if(libraryChanged){
       librarySignature=nextLibrary;gamesSignature=nextGames;
@@ -291,16 +294,60 @@
     renderBatchControls();
   }
   function renderDownloads(){
-    const downloads=[...state.downloads];
+    const downloads=[...state.downloads],list=$('#downloads-list');
     $('#clear-downloads-button').disabled=!downloads.some(d=>['completed','failed','cancelled','canceled','interrupted','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization'].includes(d.status));
-    $('#downloads-list').innerHTML=downloads.length?downloads.map(d=>{
+    if(!downloads.length){
+      setElementHtml(list,`<div class="empty-state"><div class="empty-symbol">${icon('download')}</div><h3>No downloads</h3><p>Open a mod in your library and choose the files you want.<br>Your downloads will appear here.</p><div class="empty-actions"><button class="button" data-page="library">Back to my library</button></div></div>`);
+      renderDownloadControls();return;
+    }
+    renderedHtml.delete(list);
+    const cards=new Map($$('.download-card',list).map(card=>[card.dataset.downloadId,card]));
+    for(const child of [...list.children])if(!child.classList.contains('download-card'))child.remove();
+    downloads.forEach((d,index)=>{
+      const id=String(d.id??`entry-${index}`);
+      let card=cards.get(id);
+      if(!card){
+        card=document.createElement('article');card.className='download-card';card.dataset.downloadId=id;
+        card.innerHTML='<div class="download-icon"></div><div class="download-info"><h3></h3><div class="download-meta"></div><div class="download-update-slot"></div><div class="download-progress-slot"></div><details class="download-log"><summary>Download log</summary><div class="download-log-content"></div></details></div><span class="download-status"></span><div class="download-actions"></div>';
+      }
+      cards.delete(id);
       const status=d.status||'queued',done=status==='completed',failed=['failed','cancelled','canceled','interrupted'].includes(status),waiting=['waiting-authorization','awaiting-authorization','waiting','awaiting_authorization'].includes(status);
       const current=Number(d.bytes??d.downloadedBytes??d.receivedBytes??0),total=Number(d.total??d.totalBytes??0),percent=done?100:Math.max(0,Math.min(100,total?current/total*100:Number(d.progress||0)));
       const labels={queued:'Queued',authorizing:'Authorizing',retrying:'Resuming',downloading:'Downloading',completed:'Downloaded',failed:'Failed',cancelled:'Cancelled',canceled:'Cancelled',interrupted:'Interrupted'};
       const update=done?state.downloadUpdates.find(update=>update.id===d.id):null;
-      return `<article class="download-card"><div class="download-icon">${icon(done?'check':'download')}</div><div class="download-info"><h3>${esc(d.name??d.fileName??d.filename??'Mod archive')}</h3><div class="download-meta">${esc(d.fileName??d.filename??gameName(d.gameDomain))}${total?` · ${bytes(current)} / ${bytes(total)}`:''}${d.speed?` · ${bytes(d.speed)}/s`:''}${waiting&&d.authorizationMessage?`<br><span>${esc(d.authorizationMessage)}</span>`:''}${d.error?`<br><span class="download-error">${esc(d.error)}</span>`:''}</div>${update?`<div class="download-update-note"><span class="badge update">Update available${update.version?`: ${esc(update.version)}`:''}</span><button class="text-button" data-review-download-update="${esc(d.id)}">Review update</button></div>`:''}${status==='downloading'?`<div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${percent}%"></span></div>`:''}</div><span class="download-status ${done?'completed':''}">${esc(waiting?(d.needsUser?'Nexus needs attention':'Preparing download'):labels[status]||status)}</span><div class="download-actions">${done?`<button class="icon-button" data-download-folder="${esc(d.id)}" aria-label="Show file in folder" title="Show file in folder">${icon('folder')}</button>`:failed?`<button class="button small" data-retry-download="${esc(d.id)}">Retry</button>`:`${waiting?`<button class="button small" data-retry-download="${esc(d.id)}">Open Nexus</button>`:''}<button class="icon-button" data-cancel-download="${esc(d.id)}" aria-label="Cancel download" title="Cancel download">${icon('close')}</button>`}</div></article>`;
-    }).join(''):`<div class="empty-state"><div class="empty-symbol">${icon('download')}</div><h3>No downloads</h3><p>Open a mod in your library and choose the files you want.<br>Your downloads will appear here.</p><div class="empty-actions"><button class="button" data-page="library">Back to my library</button></div></div>`;
+      const attempt=Number(d.attempt),maxAttempts=Number(d.maxAttempts),retryAt=downloadTimestamp(d.retryAt);
+      setElementHtml($('.download-icon',card),icon(done?'check':'download'));
+      const name=d.name??d.fileName??d.filename??'Mod archive';if($('h3',card).textContent!==String(name))$('h3',card).textContent=name;
+      setElementHtml($('.download-meta',card),`${esc(d.fileName??d.filename??gameName(d.gameDomain))}${total?` · ${bytes(current)} / ${bytes(total)}`:''}${status==='downloading'&&d.speed?` · ${bytes(d.speed)}/s`:''}${Number.isInteger(attempt)&&attempt>0?`<br><span class="download-attempt">Attempt ${attempt}${Number.isInteger(maxAttempts)&&maxAttempts>=attempt?` of ${maxAttempts}`:''}</span>`:''}${status==='retrying'&&retryAt?`<br><span class="download-retry-time" data-retry-at="${retryAt}" title="${esc(date(d.retryAt,true))}"></span>`:''}${['failed','interrupted'].includes(status)&&retryAt?`<br><span class="download-retry-available" data-retry-at="${retryAt}" title="${esc(date(d.retryAt,true))}"></span>`:''}${waiting&&d.authorizationMessage?`<br><span>${esc(d.authorizationMessage)}</span>`:''}${status==='interrupted'&&d.resumeOnStartup?`<br><span class="download-recovery">${state.settings.resumeDownloadsOnStartup!==false?'Saved for recovery when connected.':'Automatic recovery is off. Use Retry to continue this saved download.'}</span>`:''}${d.error?`<br><span class="download-error">${esc(d.error)}</span>`:''}${d.errorCode?`<code class="download-error-code">${esc(d.errorCode)}</code>`:''}`);
+      setElementHtml($('.download-update-slot',card),update?`<div class="download-update-note"><span class="badge update">Update available${update.version?`: ${esc(update.version)}`:''}</span><button class="text-button" data-review-download-update="${esc(d.id)}">Review update</button></div>`:'');
+      const progress=$('.download-progress-slot',card);
+      if(status==='downloading'){
+        if(!progress.firstElementChild)progress.innerHTML='<div class="progress-track" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100"><span></span></div>';
+        const track=progress.firstElementChild;track.setAttribute('aria-valuenow',String(Math.round(percent)));track.firstElementChild.style.width=`${percent}%`;
+      }else if(progress.firstChild)progress.replaceChildren();
+      const label=$('.download-status',card);label.classList.toggle('completed',done);label.textContent=waiting?(d.needsUser?'Nexus needs attention':'Preparing download'):labels[status]||status;
+      const retryRestriction=['failed','interrupted'].includes(status)&&retryAt?` data-retry-not-before="${retryAt}" title="Retry available after ${esc(date(d.retryAt,true))}"`:'';
+      setElementHtml($('.download-actions',card),done?`<button class="icon-button" data-download-folder="${esc(d.id)}" aria-label="Show file in folder" title="Show file in folder">${icon('folder')}</button>`:failed?`<button class="button small" data-retry-download="${esc(d.id)}"${retryRestriction}>Retry</button>`:`${waiting?`<button class="button small" data-retry-download="${esc(d.id)}">Open Nexus</button>`:''}<button class="icon-button" data-cancel-download="${esc(d.id)}" aria-label="Cancel download" title="Cancel download">${icon('close')}</button>`);
+      const events=Array.isArray(d.events)?d.events.filter(event=>event&&typeof event==='object').slice(-50):[];
+      setElementHtml($('.download-log-content',card),events.length?`<ol>${events.map(event=>{const at=downloadTimestamp(event.time);return `<li>${at?`<time datetime="${esc(new Date(at).toISOString())}">${esc(date(at,true))}</time>`:''}${event.code?`<code>${esc(event.code)}</code>`:''}${esc(event.message)}</li>`;}).join('')}</ol>`:'<p class="download-log-empty">No events recorded yet.</p>');
+      $('.download-log summary',card).textContent=`Download log${events.length?` (${events.length}${d.events.length>events.length?' latest':''})`:''}`;
+      if(list.children[index]!==card){const focused=card.contains(document.activeElement)?document.activeElement:null;list.insertBefore(card,list.children[index]??null);focused?.focus({preventScroll:true});}
+    });
+    for(const card of cards.values())card.remove();
+    renderRetryTimes();
     renderDownloadControls();
+  }
+  function downloadTimestamp(value){const at=Number(value)>0?timestamp(value):0;return Number.isFinite(at)&&at>0&&at<=8640000000000000?at:0;}
+  function renderRetryTimes(){
+    for(const label of $$('.download-retry-time')){
+      const remaining=Math.max(0,Math.ceil((Number(label.dataset.retryAt)-Date.now())/1000));
+      const text=remaining?`Retrying in ${remaining}s`:'Retry is due';if(label.textContent!==text)label.textContent=text;
+    }
+    for(const label of $$('.download-retry-available')){
+      const at=Number(label.dataset.retryAt),text=at>Date.now()?`Retry available after ${dateTimeFormatter.format(at)}`:'Retry available now';
+      if(label.textContent!==text)label.textContent=text;
+    }
+    for(const button of $$('[data-retry-not-before]'))button.disabled=state.clearingDownloadFolder===true||button.classList.contains('busy')||Number(button.dataset.retryNotBefore)>Date.now();
   }
   function downloadUpdateKey(update){return JSON.stringify([update.id,update.updateKey||`file:${update.fileId}`,update.archiveKey||'']);}
   function retainedDownloadUpdate(update){return state.downloads.some(download=>download.id===update.id&&download.status==='completed');}
@@ -360,7 +407,10 @@
     $('#download-folder').disabled=clearing;
     const selectedButton=$('#download-selected');
     if(selectedButton){selectedButton.classList.toggle('busy',fileBatch!==null);selectedButton.setAttribute('aria-busy',String(fileBatch!==null));}
-    for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||(fileBatch!==null&&button.hasAttribute('data-download-file'))||(button.id==='download-selected'&&selectedFiles.size===0);
+    for(const button of $$('[data-download-file],[data-retry-download],#download-selected,#browse-folder-button,#save-folder-button'))button.disabled=clearing||button.classList.contains('busy')||Number(button.dataset.retryNotBefore)>Date.now()||(fileBatch!==null&&button.hasAttribute('data-download-file'))||(button.id==='download-selected'&&selectedFiles.size===0);
+    $('#save-queue-settings').disabled=clearing||queueSettingsSaving;
+    $('#save-queue-settings').classList.toggle('busy',queueSettingsSaving);
+    $('#download-queue-form').setAttribute('aria-busy',String(queueSettingsSaving));
     renderBatchControls();
   }
   function renderSettings(){
@@ -368,8 +418,26 @@
     $('#connection-badge').textContent=state.user?'Connected':state.settings.hasApiKey?'Key saved':'Not connected';$('#connection-badge').classList.toggle('current',!!state.user);
     $('#api-key').placeholder=connected?'A key is saved. Paste here to replace it.':'Paste a personal Nexus API key';
     $('#download-folder').value=downloadFolderDraft??state.settings.downloadFolder??'';
+    for(const [key,[id,fallback]] of Object.entries(queueSettingFields)){
+      const input=$(`#${id}`),value=queueSettingsDraft?.[key]??state.settings[key]??fallback;
+      if(input.type==='checkbox')input.checked=value===true;else input.value=String(value);
+    }
     if($('#cache-size'))$('#cache-size').textContent=state.settings.cacheSizeMB!=null?`${Number(state.settings.cacheSizeMB).toFixed(1)} MB cached. Images can be fetched again.`:'Images can be fetched again when you open the app.';
     renderDownloadControls();
+  }
+  async function saveQueueSettings(event){
+    event.preventDefault();
+    const form=$('#download-queue-form');if(queueSettingsSaving||!form.reportValidity())return;
+    const payload={};
+    for(const [key,[id]] of Object.entries(queueSettingFields)){const input=$(`#${id}`);payload[key]=input.type==='checkbox'?input.checked:Number(input.value);}
+    const revision=queueSettingsRevision,result=$('#queue-settings-result');
+    queueSettingsSaving=true;result.textContent='';result.setAttribute('role','status');renderDownloadControls();
+    try{
+      consume(await rpc('saveSettings',payload));
+      if(queueSettingsRevision===revision){queueSettingsDraft=null;renderSettings();}
+      result.textContent='Queue settings saved.';
+    }catch(error){result.textContent=error.message;result.setAttribute('role','alert');}
+    finally{queueSettingsSaving=false;renderDownloadControls();}
   }
 
   // Nexus descriptions can mix HTML and BBCode. Parse both, then rebuild only
@@ -678,9 +746,15 @@
   });
   $('#mod-search').addEventListener('input',renderMods);$('#mod-sort').addEventListener('change',renderMods);$('#input-form').addEventListener('submit',submitDialog);$('#detail-scrim').addEventListener('click',closeDetail);
   $('#download-folder').addEventListener('input',e=>{downloadFolderDraft=e.target.value;});
+  $('#download-queue-form').addEventListener('submit',saveQueueSettings);
+  for(const input of $$('[data-queue-setting]'))input.addEventListener(input.type==='checkbox'?'change':'input',()=>{
+    queueSettingsDraft={...queueSettingsDraft,[input.dataset.queueSetting]:input.type==='checkbox'?input.checked:input.value};queueSettingsRevision++;
+    $('#queue-settings-result').textContent='';
+  });
   $('#input-dialog').addEventListener('close',maybeShowDownloadUpdate);
   $('#download-update-dialog').addEventListener('cancel',e=>{e.preventDefault();actOnDownloadUpdate('dismissDownloadUpdate');});
   setInterval(checkDownloadedUpdates,30*60*1000);
+  setInterval(()=>{if(currentPage==='downloads')renderRetryTimes();},1000);
   document.addEventListener('error',e=>{if(e.target.tagName==='IMG'){e.target.style.display='none';if(e.target.closest('.game-card'))e.target.parentElement.insertAdjacentHTML('afterbegin',`<span class="game-fallback">${icon('game')}<span>${esc(e.target.parentElement.title?.split(' · ')[0]||'Game')}</span></span>`);}},true);
 
   // Exposed for host-driven refreshes and local smoke tests, never contains the key.
