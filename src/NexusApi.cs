@@ -34,10 +34,10 @@ namespace NexusM
             client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(45) };
         }
 
-        public async Task<object> ValidateAsync(CancellationToken token = default(CancellationToken))
+        public async Task<object> ValidateAsync(CancellationToken token = default(CancellationToken), bool retryTransient = true)
         {
             if (validated != null) return validated;
-            var result = JsonTools.Dict(await GetAsync("users/validate.json", token).ConfigureAwait(false));
+            var result = JsonTools.Dict(await GetAsync("users/validate.json", token, retryTransient).ConfigureAwait(false));
             // Nexus echoes the credential in this response. Never expose it to the UI or local JSON.
             result.Remove("key");
             result.Remove("email");
@@ -57,10 +57,10 @@ namespace NexusM
         }
         public Task<object> FilesAsync(string domain, long modId, CancellationToken token = default(CancellationToken)) { return GetAsync(ModPath(domain, modId) + "/files.json", token); }
         public Task<object> ChangelogsAsync(string domain, long modId, CancellationToken token = default(CancellationToken)) { return GetAsync(ModPath(domain, modId) + "/changelogs.json", token); }
-        public Task<object> FileAsync(string domain, long modId, long fileId, CancellationToken token = default(CancellationToken))
+        public Task<object> FileAsync(string domain, long modId, long fileId, CancellationToken token = default(CancellationToken), bool retryTransient = true)
         {
             CheckId(fileId);
-            return GetAsync(ModPath(domain, modId) + "/files/" + fileId.ToString(CultureInfo.InvariantCulture) + ".json", token);
+            return GetAsync(ModPath(domain, modId) + "/files/" + fileId.ToString(CultureInfo.InvariantCulture) + ".json", token, retryTransient);
         }
 
         // The preview is a small public archive manifest, not an archive download.
@@ -316,13 +316,13 @@ namespace NexusM
             return results.ToArray();
         }
 
-        public Task<object> DownloadLinksAsync(DownloadRequest request, CancellationToken token)
+        public Task<object> DownloadLinksAsync(DownloadRequest request, CancellationToken token, bool retryTransient = true)
         {
             CheckId(request.FileId);
             string path = ModPath(request.Domain, request.ModId) + "/files/" + request.FileId + "/download_link.json";
             if (!String.IsNullOrEmpty(request.Key))
                 path += "?key=" + Uri.EscapeDataString(request.Key) + "&expires=" + request.Expires.ToString(CultureInfo.InvariantCulture);
-            return GetAsync(path, token);
+            return GetAsync(path, token, retryTransient);
         }
 
         public async Task<object> RequirementsAsync(string domain, long modId, CancellationToken token = default(CancellationToken))
@@ -352,12 +352,12 @@ namespace NexusM
             return JsonTools.Get(raw, "data");
         }
 
-        private Task<object> GetAsync(string path, CancellationToken token)
+        private Task<object> GetAsync(string path, CancellationToken token, bool retryTransient = true)
         {
-            return RequestAsync(new Uri("https://api.nexusmods.com/v1/" + path), null, token);
+            return RequestAsync(new Uri("https://api.nexusmods.com/v1/" + path), null, token, retryTransient);
         }
 
-        private async Task<object> RequestAsync(Uri uri, object body, CancellationToken token)
+        private async Task<object> RequestAsync(Uri uri, object body, CancellationToken token, bool retryTransient = true)
         {
             await concurrency.WaitAsync(token).ConfigureAwait(false);
             try
@@ -387,10 +387,10 @@ namespace NexusM
                         using (response)
                         {
                             UpdateLimits(response);
-                            int code = (int)response.StatusCode;
-                            if ((code == 502 || code == 503 || code == 504) && attempt < 2)
+                            int code = (int)response.StatusCode, retryAfter = RetryAfterSeconds(response);
+                            if (retryTransient && (code == 502 || code == 503 || code == 504) && attempt < 2 && retryAfter == 0)
                             { await Task.Delay(1000 * (attempt + 1), token).ConfigureAwait(false); continue; }
-                            if (!response.IsSuccessStatusCode) throw new NexusApiException(ErrorMessage(code), code);
+                            if (!response.IsSuccessStatusCode) throw new NexusApiException(ErrorMessage(code), code, retryAfter);
                             string text = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                             if (text.Length > 24 * 1024 * 1024) throw new NexusApiException("Nexus returned too much data for this request.", 502);
                             try { return JsonTools.Serializer().DeserializeObject(text); }
@@ -411,6 +411,14 @@ namespace NexusM
                     IEnumerable<string> values;
                     if (response.Headers.TryGetValues(name, out values)) limits[name] = String.Join(",", values);
                 }
+        }
+
+        private static int RetryAfterSeconds(HttpResponseMessage response)
+        {
+            var retry = response.Headers.RetryAfter;
+            if (retry == null) return 0;
+            double seconds = retry.Delta.HasValue ? retry.Delta.Value.TotalSeconds : retry.Date.HasValue ? (retry.Date.Value - DateTimeOffset.UtcNow).TotalSeconds : 0;
+            return (int)Math.Max(0, Math.Min(Int32.MaxValue, Math.Ceiling(seconds)));
         }
 
         private static string ErrorMessage(int code)

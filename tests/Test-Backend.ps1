@@ -12,7 +12,7 @@ try {
     $sources = @('Models.cs', 'NexusApi.cs', 'DownloadService.cs') | ForEach-Object { Join-Path $project ('src\' + $_) }
     & $compiler /nologo /target:library "/out:$library" /r:System.Net.Http.dll /r:System.Web.dll /r:System.Web.Extensions.dll @sources
     if ($LASTEXITCODE -ne 0) { throw 'Backend compilation failed.' }
-    & $compiler /nologo "/out:$runner" "/r:$library" /r:System.Net.Http.dll (Join-Path $PSScriptRoot 'BackendTests.cs')
+    & $compiler /nologo "/out:$runner" "/r:$library" /r:System.Net.Http.dll /r:System.Web.Extensions.dll (Join-Path $PSScriptRoot 'BackendTests.cs')
     if ($LASTEXITCODE -ne 0) { throw 'Backend test compilation failed.' }
     & $runner
     if ($LASTEXITCODE -ne 0) { throw 'Backend tests failed.' }

@@ -64,7 +64,35 @@ namespace NexusM
     public sealed class NexusApiException : Exception
     {
         public int StatusCode { get; private set; }
-        public NexusApiException(string message, int statusCode) : base(message) { StatusCode = statusCode; }
+        public int RetryAfterSeconds { get; private set; }
+        public NexusApiException(string message, int statusCode, int retryAfterSeconds = 0) : base(message)
+        { StatusCode = statusCode; RetryAfterSeconds = Math.Max(0, retryAfterSeconds); }
+    }
+
+    public sealed class DownloadOptions
+    {
+        public int MaxParallelDownloads { get; set; }
+        public int MaxDownloadRetries { get; set; }
+        public int DownloadTimeoutSeconds { get; set; }
+        public int RetryDelaySeconds { get; set; }
+
+        public DownloadOptions()
+        {
+            MaxParallelDownloads = 2;
+            MaxDownloadRetries = 3;
+            DownloadTimeoutSeconds = 90;
+            RetryDelaySeconds = 2;
+        }
+
+        public DownloadOptions ValidatedCopy()
+        {
+            if (MaxParallelDownloads < 1 || MaxParallelDownloads > 4) throw new ArgumentOutOfRangeException("MaxParallelDownloads", "Choose between 1 and 4 parallel downloads.");
+            if (MaxDownloadRetries < 0 || MaxDownloadRetries > 10) throw new ArgumentOutOfRangeException("MaxDownloadRetries", "Choose between 0 and 10 retries.");
+            if (DownloadTimeoutSeconds < 15 || DownloadTimeoutSeconds > 600) throw new ArgumentOutOfRangeException("DownloadTimeoutSeconds", "Choose a timeout between 15 and 600 seconds.");
+            if (RetryDelaySeconds < 1 || RetryDelaySeconds > 60) throw new ArgumentOutOfRangeException("RetryDelaySeconds", "Choose a retry delay between 1 and 60 seconds.");
+            return new DownloadOptions { MaxParallelDownloads = MaxParallelDownloads, MaxDownloadRetries = MaxDownloadRetries,
+                DownloadTimeoutSeconds = DownloadTimeoutSeconds, RetryDelaySeconds = RetryDelaySeconds };
+        }
     }
 
     public sealed class DownloadRequest
