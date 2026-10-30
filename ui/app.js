@@ -351,41 +351,55 @@
   }
   function downloadUpdateKey(update){return JSON.stringify([update.id,update.updateKey||`file:${update.fileId}`,update.archiveKey||'']);}
   function retainedDownloadUpdate(update){return state.downloads.some(download=>download.id===update.id&&download.status==='completed');}
+  function downloadUpdateTarget(update){
+    if(update.reviewOnly||Number(update.fileId)<=0)return null;
+    return state.downloads.find(download=>modDomain(download)===modDomain(update)&&modId(download)===modId(update)&&fileId(download)===Number(update.fileId))||null;
+  }
+  function pendingDownloadUpdateTarget(update){return ['queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization'].includes(downloadUpdateTarget(update)?.status);}
   function maybeShowDownloadUpdate(){
     if(downloadUpdateBusy)return;
     if(activeDownloadUpdate){
-      if(state.downloadUpdates.some(update=>downloadUpdateKey(update)===downloadUpdateKey(activeDownloadUpdate)&&retainedDownloadUpdate(update)))return;
+      const current=state.downloadUpdates.find(update=>downloadUpdateKey(update)===downloadUpdateKey(activeDownloadUpdate)&&retainedDownloadUpdate(update));
+      if(current){activeDownloadUpdate=current;renderDownloadUpdate(current);return;}
       activeDownloadUpdate=null;$('#download-update-dialog').close();
     }
-    if(state.clearingDownloadFolder||detail||$('dialog[open]'))return;
-    const update=state.downloadUpdates.find(update=>retainedDownloadUpdate(update)&&!update.dismissed&&!shownDownloadUpdates.has(downloadUpdateKey(update)));
+    if(state.clearingDownloadFolder||$('dialog[open]'))return;
+    const update=state.downloadUpdates.find(update=>retainedDownloadUpdate(update)&&!update.dismissed&&!shownDownloadUpdates.has(downloadUpdateKey(update))&&(!detail||pendingDownloadUpdateTarget(update)||downloadUpdateTarget(update)?.status==='completed'));
     if(update)showDownloadUpdate(update);
   }
   function showDownloadUpdate(update){
     if(downloadUpdateBusy||state.clearingDownloadFolder||$('dialog[open]'))return;
     activeDownloadUpdate=update;shownDownloadUpdates.add(downloadUpdateKey(update));
-    $('#download-update-mod').textContent=update.modName||update.oldName||'A downloaded mod';
-    $('#download-update-summary').textContent=update.reviewOnly?`now reports version ${update.version||'not specified'}. Review its available files to choose the right download.`:'has a newer file linked by its author on Nexus.';
-    $('#download-update-files').innerHTML=`<div><span>Downloaded version ${esc(update.oldVersion||'not recorded')}</span><strong>${esc(update.oldName||'Downloaded archive')}</strong><code>${esc(update.oldFilename||update.oldPath)}</code></div>${update.reviewOnly?'':`<div><span>Available version ${esc(update.version||'not specified')}</span><strong>${esc(update.name||'Replacement archive')}</strong><code>${esc(update.filename||update.name)}</code></div>`}`;
-    $('#download-update-files').classList.toggle('review-only',!!update.reviewOnly);
-    $('#download-update-replace').textContent=update.reviewOnly?'Review files':'Replace';
-    $('#download-update-replace-note').textContent=update.reviewOnly?'Nexus has not identified one exact replacement for this archive. Review the file choices and author instructions before downloading.':'Replace downloads the newer file first, then permanently deletes this old archive only after the download succeeds. The new archive keeps its own filename.';
-    $('#download-update-path').textContent=update.oldPath||'';
+    renderDownloadUpdate(update);
     $('#download-update-error').classList.add('hidden');
     for(const button of $$('#download-update-dialog button'))button.disabled=false;
     $('#download-update-dialog').showModal();$('#download-update-keep').focus();
+  }
+  function renderDownloadUpdate(update){
+    const completed=downloadUpdateTarget(update)?.status==='completed',pending=pendingDownloadUpdateTarget(update);
+    $('#download-update-mod').textContent=update.modName||update.oldName||'A downloaded mod';
+    $('#download-update-summary').textContent=update.reviewOnly?`now reports version ${update.version||'not specified'}. Review its available files to choose the right download.`:completed?'has a newer file already downloaded. Choose whether to remove the old archive.':pending?'has a newer file in your download queue. Choose whether to replace the old archive when it finishes.':'has a newer file linked by its author on Nexus.';
+    setHtml('#download-update-files',`<div><span>Downloaded version ${esc(update.oldVersion||'not recorded')}</span><strong>${esc(update.oldName||'Downloaded archive')}</strong><code>${esc(update.oldFilename||update.oldPath)}</code></div>${update.reviewOnly?'':`<div><span>Available version ${esc(update.version||'not specified')}</span><strong>${esc(update.name||'Replacement archive')}</strong><code>${esc(update.filename||update.name)}</code></div>`}`);
+    $('#download-update-files').classList.toggle('review-only',!!update.reviewOnly);
+    $('#download-update-replace').textContent=update.reviewOnly?'Review files':completed?'Replace with downloaded file':pending?'Replace when ready':'Replace';
+    $('#download-update-replace-note').textContent=update.reviewOnly?'Nexus has not identified one exact replacement for this archive. Review the file choices and author instructions before downloading.':completed?'Replace uses the newer archive already downloaded, verifies its saved file identity, then permanently deletes this old archive.':pending?'Replace uses the newer file already in your queue, then permanently deletes this old archive only after that download succeeds. Failed or cancelled downloads keep the old archive.':'Replace downloads the newer file first, then permanently deletes this old archive only after the download succeeds. The new archive keeps its own filename.';
+    $('#download-update-path').textContent=update.oldPath||'';
   }
   async function actOnDownloadUpdate(action){
     if(!activeDownloadUpdate||downloadUpdateBusy)return;
     const update=activeDownloadUpdate;downloadUpdateBusy=true;
     for(const button of $$('#download-update-dialog button'))button.disabled=true;
     $('#download-update-error').classList.add('hidden');
-    const reviewFiles=action==='replaceDownloadUpdate'&&update.reviewOnly;
+    const reviewFiles=action==='replaceDownloadUpdate'&&update.reviewOnly,pending=pendingDownloadUpdateTarget(update);
     try{
-      consume(await rpc(reviewFiles?'dismissDownloadUpdate':action,{id:update.id,fileId:Number(update.fileId),updateKey:update.updateKey||`file:${update.fileId}`,archiveKey:update.archiveKey}));
+      const result=await rpc(reviewFiles?'dismissDownloadUpdate':action,{id:update.id,fileId:Number(update.fileId),updateKey:update.updateKey||`file:${update.fileId}`,archiveKey:update.archiveKey});
+      consume(result);
       activeDownloadUpdate=null;$('#download-update-dialog').close();
       if(reviewFiles)await showMod(modKey(update));
-      else if(action==='replaceDownloadUpdate')toast('Replacement queued. The old archive stays until the new download finishes.');
+      else if(action==='replaceDownloadUpdate'){
+        if(downloadUpdateTarget(update)?.status==='completed'){if(!result?.notice&&!result?.state?.notice)toast(retainedDownloadUpdate(update)?'The downloaded update is ready. The old archive was kept.':'The downloaded update replaced the old archive.');}
+        else toast(`${pending?'Replacement scheduled.':'Replacement queued.'} The old archive stays until the new download finishes.`);
+      }
       else if(action==='deleteDownloadUpdate')toast('Old archive deleted. Your download history is kept.');
     }catch(error){
       if(action==='dismissDownloadUpdate'){activeDownloadUpdate=null;$('#download-update-dialog').close();toast(error.message,true);}

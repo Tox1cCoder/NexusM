@@ -31,7 +31,16 @@ namespace NexusM
                         await Check("missing relationships offer review without choosing a replacement", ReviewFallback);
                         await Check("dismissal persists for one update and a later target notifies again", Dismissal);
                         await Check("transient failures retain known updates and overlapping checks join bounded workers", FailureAndConcurrency);
+                        await Check("ordinary downloads notify about the matching retained old archive before authorization", OrdinaryDownloadNotification);
+                        await Check("batch downloads reuse their fresh file list to notify about old archives", BatchDownloadNotification);
+                        await Check("direct Nexus links notify about old archives before safely failed authorization", DirectNxmNotification);
+                        await Check("cancelling a direct Nexus link releases its transfer slot during an old-archive check", CancelDirectNxmNotification);
+                        await Check("download notifications match exact targets and preserve dismissal and archive ownership", DownloadNotificationMatching);
                         await Check("replacement keeps old archive until a verified new download completes", Replacement);
+                        await Check("normal popup replacement dismisses the refreshed notification while authorization is queued", NormalReplacementDismissal);
+                        await Check("replacement joins an already queued newer file without duplicating authorization", JoinPendingReplacement);
+                        await Check("replacement reuses a verified completed newer archive without downloading it again", ReuseCompletedReplacement);
+                        await Check("an externally changed completed target cannot justify deleting the old archive", ChangedCompletedReplacement);
                         await Check("cancelled replacement cannot delete an archive on a later unrelated download", CancelReplacement);
                         await Check("Keep old file overrides an already queued replacement", KeepOverridesReplacement);
                         await Check("authorization failure rolls back destructive replacement intent", AuthorizationFailure);
@@ -100,6 +109,11 @@ namespace NexusM
                 return row;
             }
             internal void Authorize(string url, string id) { Expect(url.EndsWith("&nmm=1", StringComparison.Ordinal), "Replacement bypassed normal Nexus authorization."); Authorizations.Add(id); }
+            internal void CacheDetails(long fileId = 11, long modId = 1)
+            {
+                var details = (Dictionary<string, object>)typeof(Controller).GetField("details", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(Controller);
+                details["fixturegame:" + modId] = Data.Obj("files", new[] { Data.Obj("fileId", fileId, "name", "New archive", "category", "MAIN", "version", "1.1") });
+            }
             public void Dispose() { Server.Release(); Controller.Dispose(); Form.Dispose(); }
         }
 
@@ -109,12 +123,17 @@ namespace NexusM
             internal readonly HashSet<long> Fail = new HashSet<long>();
             internal readonly List<long> Requests = new List<long>();
             internal TaskCompletionSource<bool> Gate;
-            internal int Active, MaxConcurrent;
+            internal int Active, MaxConcurrent, RejectedRequests;
             internal void Release() { if (Gate != null) Gate.TrySetResult(true); }
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
             {
                 string[] parts = request.RequestUri.AbsolutePath.Split('/');
-                if (request.RequestUri.Host != "api.nexusmods.com" || parts.Length != 7 || parts[6] != "files.json") throw new Exception("Fixture attempted an unexpected network request.");
+                if (request.RequestUri.Host != "api.nexusmods.com") throw new Exception("Fixture attempted an unexpected network request.");
+                if (parts.Length == 6 && parts[4] == "mods" && parts[5].EndsWith(".json", StringComparison.Ordinal))
+                    return JsonResponse(Data.Obj("name", "Mod fixture", "version", "1.1", "updated_timestamp", 2000, "game_id", 1));
+                if (parts.Length == 7 && parts[6] == "changelogs.json") return JsonResponse(Data.Obj());
+                if (request.RequestUri.AbsolutePath == "/v2/graphql") return JsonResponse(Data.Obj("data", Data.Obj("mod", Data.Obj("modRequirements", Data.Obj()))));
+                if (parts.Length != 7 || parts[6] != "files.json") { RejectedRequests++; throw new Exception("Fixture rejected an unexpected network request before sending it."); }
                 long modId = Int64.Parse(parts[5]);
                 lock (Requests) { Requests.Add(modId); Active++; MaxConcurrent = Math.Max(MaxConcurrent, Active); }
                 try {
@@ -125,6 +144,7 @@ namespace NexusM
                 }
                 finally { lock (Requests) { Active--; } }
             }
+            private static HttpResponseMessage JsonResponse(object value) { return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Data.Json.Serialize(value), Encoding.UTF8, "application/json") }; }
         }
 
         private static Task ResolveChains()
@@ -202,6 +222,134 @@ namespace NexusM
                 Expect(!System.IO.File.Exists(oldPath) && System.IO.File.Exists(Data.Str(final, "path")), "Successful replacement did not delete only the old archive.");
                 Expect(!f.Store.Downloads.Any(item => Data.Str(item, "id") == "fixturegame:1:10"), "Deleted old archive stayed in Downloads.");
                 Expect(Data.Get(Data.Get(f.Store.State, "fileDownloads"), "fixturegame:1:10") != null, "Replacement erased exact-file download history.");
+            }
+        }
+        private static async Task OrdinaryDownloadNotification()
+        {
+            using (var f = new Fixture("ordinary-download")) {
+                object old = f.Archive(); f.CacheDetails();
+                await f.Controller.AuthorizeDownload("fixturegame", 1, 11, delegate(string url, string id) {
+                    Expect(Updates(f).Count == 1 && Data.Num(Updates(f)[0], "fileId") == 11, "The normal download reached authorization without notifying about its older archive.");
+                    f.Authorize(url, id);
+                });
+                Expect(f.Authorizations.SequenceEqual(new[] { "fixturegame:1:11" }), "The normal download was queued incorrectly.");
+                Expect(System.IO.File.Exists(Data.Str(old, "path")) && Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 0, "Starting a newer download deleted or authorized deletion of the old archive without consent.");
+                var restored = new Storage(f.Store.Root);
+                Expect(restored.Downloads.Any(row => Data.Str(row, "id") == "fixturegame:1:11"), "The newer file was not saved in the queue.");
+            }
+        }
+        private static async Task NormalReplacementDismissal()
+        {
+            using (var f = new Fixture("normal-popup-replacement")) {
+                object old = f.Archive(); await f.Controller.CheckDownloadedUpdates();
+                // Hold authorization in its saved queue so the fixture never opens a Nexus browser.
+                typeof(Controller).GetField("changingSettings", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(f.Controller, true);
+                await f.Controller.HandleDownloadedUpdate("replaceDownloadUpdate", Payload(Updates(f).Single()));
+                Expect(Updates(f).Count == 1 && Data.Bool(Updates(f)[0], "dismissed"), "Refreshing the notification during authorization left the replacement popup open.");
+                Expect(Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 1 && System.IO.File.Exists(Data.Str(old, "path")), "Normal authorization lost its replacement intent or deleted the old archive early.");
+                Expect(Data.Str(f.Store.Downloads.Single(row => Data.Str(row, "id") == "fixturegame:1:11"), "status") == "waiting-authorization", "The normal replacement was not saved for authorization.");
+            }
+        }
+        private static async Task BatchDownloadNotification()
+        {
+            using (var f = new Fixture("batch-download")) {
+                object old = f.Archive();
+                object result = await f.Controller.StartBatchDownload(new[] { Data.Obj("gameDomain", "fixturegame", "modId", 1) }, f.Authorize);
+                Expect(Data.Num(Data.Get(result, "batch"), "queued") == 1 && Updates(f).Count == 1 && Data.Num(Updates(f)[0], "fileId") == 11, "Batch admission did not notify about the older archive.");
+                Expect(f.Server.Requests.SequenceEqual(new long[] { 1 }), "Batch notification fetched the file list again instead of reusing the fresh check.");
+                Expect(System.IO.File.Exists(Data.Str(old, "path")) && Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 0, "Batch admission deleted the old archive or assumed replacement consent.");
+            }
+        }
+        private static async Task DownloadNotificationMatching()
+        {
+            using (var f = new Fixture("download-matching", 2)) {
+                object old = f.Archive(); f.Archive(20, 2);
+                object response = Response(new[] { File(11), File(99, "9.9", "OPTIONAL") }, Edge(10, 11));
+                await f.Controller.NotifyDownloadingUpdate("fixturegame", 1, 99, response);
+                Expect(Updates(f).Count == 0, "An unrelated optional file was offered as a replacement.");
+                await f.Controller.NotifyDownloadingUpdate("differentgame", 1, 11, response);
+                Expect(Updates(f).Count == 0, "A different game's file identifiers matched the old archive.");
+                await f.Controller.NotifyDownloadingUpdate("fixturegame", 1, 10, response);
+                Expect(Updates(f).Count == 0, "Re-downloading the old file prompted to replace it with another target.");
+                await f.Controller.NotifyDownloadingUpdate("fixturegame", 1, 11, response);
+                Expect(Updates(f).Count == 1 && Data.Str(Updates(f)[0], "id") == "fixturegame:1:10", "The selected target did not identify its exact older archive.");
+                await f.Controller.HandleDownloadedUpdate("dismissDownloadUpdate", Payload(Updates(f).Single()));
+                await f.Controller.NotifyDownloadingUpdate("fixturegame", 1, 11, response);
+                Expect(Updates(f).Count == 1 && Data.Bool(Updates(f)[0], "dismissed"), "Starting the same newer download discarded Keep old file.");
+                System.IO.File.AppendAllText(Data.Str(old, "path"), "changed externally");
+                f.Store.State.Remove("downloadUpdates");
+                await f.Controller.NotifyDownloadingUpdate("fixturegame", 1, 11, response);
+                Expect(Updates(f).Count == 0, "The requested newer file enabled deletion of an externally changed old archive.");
+            }
+            using (var f = new Fixture("download-check-failure")) {
+                object old = f.Archive(); f.Server.Responses[1] = Data.Obj("files", "unreadable");
+                await f.Controller.NotifyDownloadingUpdate("fixturegame", 1, 11);
+                Expect(Updates(f).Count == 0 && System.IO.File.Exists(Data.Str(old, "path")), "An unreadable update check invented a replacement or removed the old archive.");
+            }
+        }
+        private static async Task DirectNxmNotification()
+        {
+            using (var f = new Fixture("direct-nxm-download")) {
+                object old = f.Archive();
+                var downloader = new DownloadService(f.Controller.Api, null);
+                typeof(Controller).GetField("downloader", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(f.Controller, downloader);
+                await f.Controller.ReceiveNxm("nxm://fixturegame/mods/1/files/11");
+                Expect(Updates(f).Count == 1 && Data.Num(Updates(f)[0], "fileId") == 11, "The direct Nexus link did not create a replacement notification.");
+                Expect(System.IO.File.Exists(Data.Str(old, "path")) && Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 0, "A failed direct Nexus link deleted or scheduled deletion of the old archive.");
+                Expect(Data.Str(f.Store.Downloads.Single(row => Data.Str(row, "id") == "fixturegame:1:11"), "status") == "failed", "The synthetic authorization failure was not retained in the queue.");
+                Expect(f.Server.Requests.SequenceEqual(new long[] { 1 }) && f.Server.RejectedRequests == 1, "The direct link did not stop at the fixture's rejected account validation request.");
+            }
+        }
+        private static async Task CancelDirectNxmNotification()
+        {
+            using (var f = new Fixture("cancel-direct-nxm-download")) {
+                object old = f.Archive(); f.Server.Gate = new TaskCompletionSource<bool>();
+                var downloader = new DownloadService(f.Controller.Api, null);
+                typeof(Controller).GetField("downloader", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(f.Controller, downloader);
+                Task receiving = f.Controller.ReceiveNxm("nxm://fixturegame/mods/1/files/11");
+                await Task.Delay(30);
+                Expect(f.Server.Requests.SequenceEqual(new long[] { 1 }), "Direct Nexus admission skipped its old-archive check.");
+                await f.Controller.Handle("cancelDownload", Data.Obj("id", "fixturegame:1:11"));
+                Expect(await Task.WhenAny(receiving, Task.Delay(2000)) == receiving, "Cancellation waited for the old-archive API check instead of releasing its transfer slot.");
+                await receiving;
+                Expect(!f.Server.Gate.Task.IsCompleted && !f.Controller.HasActiveTransfers && f.Server.Active == 0, "The cancelled link still occupied an API request or transfer slot.");
+                Expect(Updates(f).Count == 0, "A cancelled old-archive check emitted a notification after cancellation.");
+                Expect(System.IO.File.Exists(Data.Str(old, "path")) && Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 0, "A cancelled direct Nexus link deleted or scheduled deletion of the old archive.");
+                Expect(Data.Str(f.Store.Downloads.Single(row => Data.Str(row, "id") == "fixturegame:1:11"), "status") == "cancelled", "The cancelled direct link lost its terminal queue state.");
+                Expect(f.Server.Requests.Count == 1 && f.Server.RejectedRequests == 0, "Cancellation allowed an archive authorization or download request.");
+            }
+        }
+        private static async Task JoinPendingReplacement()
+        {
+            using (var f = new Fixture("join-pending")) {
+                object old = f.Archive(); f.CacheDetails();
+                await f.Controller.AuthorizeDownload("fixturegame", 1, 11, f.Authorize);
+                await f.Controller.HandleDownloadedUpdate("replaceDownloadUpdate", Payload(Updates(f).Single()), f.Authorize);
+                Expect(f.Authorizations.SequenceEqual(new[] { "fixturegame:1:11" }), "Replacement duplicated an existing newer download's authorization.");
+                Expect(f.Store.Downloads.Count(row => Data.Str(row, "id") == "fixturegame:1:11") == 1 && System.IO.File.Exists(Data.Str(old, "path")), "Joining the pending target duplicated its queue row or deleted the old archive early.");
+                object final = f.Archive(11); f.Controller.CompleteDownloadReplacement(final);
+                Expect(!System.IO.File.Exists(Data.Str(old, "path")) && System.IO.File.Exists(Data.Str(final, "path")), "The joined newer download did not replace the old archive on verified completion.");
+            }
+        }
+        private static async Task ReuseCompletedReplacement()
+        {
+            using (var f = new Fixture("reuse-completed")) {
+                object old = f.Archive(), final = f.Archive(11); Data.Map(final)["version"] = "1.1";
+                await f.Controller.CheckDownloadedUpdates();
+                await f.Controller.HandleDownloadedUpdate("replaceDownloadUpdate", Payload(Updates(f).Single()), f.Authorize);
+                Expect(f.Authorizations.Count == 0, "A verified completed replacement was downloaded again.");
+                Expect(!System.IO.File.Exists(Data.Str(old, "path")) && System.IO.File.Exists(Data.Str(final, "path")), "Reusing the completed target failed to delete only the old archive.");
+                Expect(Data.Str(final, "status") == "completed" && Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 0, "Completed reuse reset the target or left a future destructive intent.");
+                Expect(Data.Str(f.Store.State, "notice").Contains("old version was deleted"), "Completed reuse did not report the actual cleanup outcome.");
+            }
+        }
+        private static async Task ChangedCompletedReplacement()
+        {
+            using (var f = new Fixture("changed-completed-target")) {
+                object old = f.Archive(), final = f.Archive(11); System.IO.File.AppendAllText(Data.Str(final, "path"), "changed externally");
+                await f.Controller.CheckDownloadedUpdates();
+                await Reject(async delegate { await f.Controller.HandleDownloadedUpdate("replaceDownloadUpdate", Payload(Updates(f).Single()), f.Authorize); });
+                Expect(System.IO.File.Exists(Data.Str(old, "path")) && f.Authorizations.Count == 0 && Data.Map(Data.Get(f.Store.State, "downloadReplacements")).Count == 0, "An unverified completed target triggered deletion, another download, or a pending delete decision.");
             }
         }
         private static async Task CancelReplacement()

@@ -1017,6 +1017,38 @@
         expect(requests.filter(request=>request.action==='replaceDownloadUpdate').length===replacements,'File review must not queue an assumed replacement.');
         $('#detail-close').click();window.NexusM.setState({downloadUpdates:[],downloads:[]});
       });
+      await check('a matching queued update prompts over mod details and joins the existing download',async()=>{
+        await window.NexusM.showMod('game1:1');
+        const update={...archiveUpdate,fileId:44,updateKey:'file:44'},target={id:'game1:1:44',gameDomain:'game1',modId:1,fileId:44,name:'Queued newer archive',status:'waiting-authorization'};
+        window.NexusM.setState({downloads:[updateArchive,{...target,id:'game2:1:44',gameDomain:'game2'},{...target,id:'game1:2:44',modId:2}],downloadUpdates:[update]});
+        expect(!$('#download-update-dialog').open,'A matching file ID from another game or mod must not interrupt file review.');
+        window.NexusM.setState({downloads:[updateArchive,target]});
+        expect($('#download-update-dialog').open&&!$('#detail-panel').classList.contains('hidden'),'Starting the newer file must offer old-archive replacement while its mod details remain open.');
+        expect($('#download-update-replace').textContent==='Replace when ready'&&$('#download-update-replace-note').textContent.includes('already in your queue'),'Queued replacement consent must explain that it uses the existing download.');
+        const starts=requests.filter(request=>request.action==='startDownload').length;
+        $('#download-update-replace').click();
+        expect(downloadUpdateRequest?.action==='replaceDownloadUpdate'&&downloadUpdateRequest.payload.fileId===44,'The pending download must require an explicit replacement action for the correct target.');
+        await answerUpdate({downloads:[updateArchive,target],downloadUpdates:[{...update,dismissed:true}]});
+        expect(!$('#download-update-dialog').open&&$('.toasts').textContent.includes('Replacement scheduled.'),'Joining an existing download must close the prompt and confirm scheduled cleanup.');
+        expect(requests.filter(request=>request.action==='startDownload').length===starts,'Joining an existing download must not issue another file download request.');
+        $('#detail-close').click();window.NexusM.setState({downloads:[],downloadUpdates:[]});
+      });
+      await check('a completed target refreshes open consent and reuses the downloaded archive',async()=>{
+        const update={...archiveUpdate,fileId:45,updateKey:'file:45'},target={id:'game1:1:45',gameDomain:'game1',modId:1,fileId:45,name:'Downloaded newer archive',status:'downloading'};
+        window.NexusM.setState({downloads:[updateArchive,target],downloadUpdates:[update]});
+        expect($('#download-update-dialog').open&&$('#download-update-replace').textContent==='Replace when ready','An active transfer must initially offer cleanup after completion.');
+        target.status='completed';window.NexusM.setState({downloads:[updateArchive,{...target}]});
+        expect($('#download-update-replace').textContent==='Replace with downloaded file'&&$('#download-update-summary').textContent.includes('already downloaded'),'Completing the transfer must update the currently displayed replacement choice.');
+        expect($('#download-update-replace-note').textContent.includes('verifies its saved file identity'),'Reusing a completed file must explain archive verification before permanent cleanup.');
+        const starts=requests.filter(request=>request.action==='startDownload').length;
+        $('#download-update-replace').click();
+        expect(downloadUpdateRequest?.action==='replaceDownloadUpdate'&&downloadUpdateRequest.payload.archiveKey===update.archiveKey,'Completed replacement must still submit the displayed old archive identity.');
+        await answerUpdate({downloads:[target],downloadUpdates:[],notice:'The updated archive was downloaded and the old version was deleted.'});
+        expect(!$('#download-update-dialog').open&&!$('#downloads-list').textContent.includes(updateArchive.filename),'Successful reuse must remove only the old archive entry.');
+        expect(requests.filter(request=>request.action==='startDownload').length===starts,'A completed replacement must not request another download.');
+        expect($('.toasts').textContent.includes('old version was deleted'),'Completed replacement must show the backend cleanup result.');
+        window.NexusM.setState({downloads:[],downloadUpdates:[],notice:''});
+      });
       await check('periodic downloaded-update checks run once and wait for connection, refresh, and cleanup',async()=>{
         window.NexusM.setState({downloads:[updateArchive],downloadUpdates:[],settings:{hasApiKey:true},refreshProgress:{running:false}});
         const before=requests.filter(request=>request.action==='checkDownloadUpdates').length;

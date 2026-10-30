@@ -54,6 +54,8 @@ See [Download queue behavior and recovery](docs/download-queue.md) for configura
 
 While a completed archive remains in **Downloads**, NexusM checks for newer versions at startup, with **Check for updates**, and every 30 minutes while the app is open. A popup shows the old and new filenames and versions. Matching uses Nexus mod/file IDs and the author's file-update links, so changed archive names are supported.
 
+Downloading a linked newer file also checks for older retained archives, including batch downloads and Nexus download links. The popup can appear while the mod's details are open. If the newer file is already queued, **Replace when ready** uses that transfer; if it has finished, **Replace with downloaded file** verifies and uses the saved archive. Neither choice downloads a second copy.
+
 - **Replace** downloads the newer file through the normal Nexus flow, then permanently deletes the recorded old archive after the new download succeeds. Failed or cancelled downloads keep the old file.
 - **Delete old file** permanently deletes only that recorded archive and removes its Downloads entry. Its download history stays.
 - **Keep old file** dismisses that update's popup. Use **Review update** on its Downloads entry to reopen it; a later update can notify you again.

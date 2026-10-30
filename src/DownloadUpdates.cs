@@ -80,6 +80,37 @@ namespace NexusM
             return downloadUpdatesTask;
         }
 
+        internal async Task NotifyDownloadingUpdate(string domain, long modId, long fileId, object response = null, CancellationToken token = default(CancellationToken))
+        {
+            if (!token.CanBeCanceled) token = lifetime.Token;
+            token.ThrowIfCancellationRequested();
+            var retained = Store.Downloads.Where(row => Data.Str(row, "gameDomain") == domain && Data.Num(row, "modId") == modId &&
+                Data.Num(row, "fileId") != fileId && RetainedArchive(row)).ToList();
+            if (retained.Count == 0) return;
+            try {
+                response = response ?? await Api.FilesAsync(domain, modId, token);
+                if (!(Data.Get(response, "files") is object[]) && !(Data.Get(response, "files") is IList))
+                    throw new NexusApiException("Nexus returned an unreadable file list.", 502);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception) {
+                // An update-check failure must not prevent an authorized download.
+                Store.State["notice"] = "Older downloaded files could not be checked. Their archives were kept.";
+                return;
+            }
+            token.ThrowIfCancellationRequested();
+            var updates = Data.List(Data.Get(Store.State, "downloadUpdates"));
+            foreach (var row in retained) {
+                if (!Store.Downloads.Contains(row) || !RetainedArchive(row)) continue;
+                var target = DownloadUpdateResolver.Resolve(Data.Num(row, "fileId"), response);
+                if (target == null || Data.Num(target, "file_id") != fileId) continue;
+                updates.RemoveAll(update => Data.Str(update, "id") == Data.Str(row, "id"));
+                updates.Add(DownloadUpdate(row, target));
+            }
+            Store.State["downloadUpdates"] = updates;
+            PruneDownloadedUpdates(); Store.Save(); Emit();
+        }
+
         private async Task CheckDownloadedUpdatesCore()
         {
             RequireApi();
@@ -157,6 +188,17 @@ namespace NexusM
                 "reviewOnly", reviewOnly, "updateKey", updateKey, "archiveKey", ArchiveKey(row), "dismissed", dismissed == updateKey);
         }
 
+        private void DismissDownloadedUpdate(object update)
+        {
+            string id = Data.Str(update, "id"), key = Data.Str(update, "updateKey");
+            var dismissed = Data.Map(Data.Get(Store.State, "dismissedDownloadUpdates"));
+            dismissed[id] = key; Store.State["dismissedDownloadUpdates"] = dismissed;
+            // Authorization or another scan may have refreshed the notification object.
+            foreach (var current in Data.List(Data.Get(Store.State, "downloadUpdates")))
+                if (Data.Str(current, "id") == id && Data.Str(current, "updateKey") == key && Data.Str(current, "archiveKey") == Data.Str(update, "archiveKey"))
+                    Data.Map(current)["dismissed"] = true;
+        }
+
         internal async Task<object> HandleDownloadedUpdate(string action, Dictionary<string, object> p, Action<string, string> authorize = null, Action<string> delete = null)
         {
             RequireFolderAvailable();
@@ -172,8 +214,7 @@ namespace NexusM
                 if (action == "dismissDownloadUpdate") {
                     // A later Keep choice supersedes a queued replacement's delete intent.
                     CancelDownloadReplacement(id);
-                    var dismissed = Data.Map(Data.Get(Store.State, "dismissedDownloadUpdates")); dismissed[id] = Data.Str(update, "updateKey"); Store.State["dismissedDownloadUpdates"] = dismissed;
-                    Data.Map(update)["dismissed"] = true; Store.Save(); Emit(); return Store.PublicState();
+                    DismissDownloadedUpdate(update); Store.Save(); Emit(); return Store.PublicState();
                 }
                 if (action != "replaceDownloadUpdate" && action != "deleteDownloadUpdate") throw new ArgumentException("Unknown download update action.");
                 RequireApi();
@@ -193,20 +234,25 @@ namespace NexusM
                 else {
                     if (reviewOnly) throw new InvalidOperationException("Open this mod to review and choose its files. Nexus did not identify a single replacement for the old archive.");
                     long fileId = Data.Num(target, "file_id"); string targetId = domain + ":" + modId + ":" + fileId;
-                    if (DownloadAuthorizationPending(targetId)) throw new InvalidOperationException("The newer file is already being downloaded. Wait for it to finish.");
+                    var completed = Store.Downloads.FirstOrDefault(item => Data.Str(item, "id") == targetId && Data.Str(item, "status") == "completed");
+                    if (completed != null && !RetainedArchive(completed))
+                        throw new InvalidOperationException("The newer archive is no longer available or has changed. Download it again before replacing the old archive.");
+                    bool downloading = DownloadAuthorizationPending(targetId);
                     var replacements = Data.Map(Data.Get(Store.State, "downloadReplacements"));
                     replacements[id] = Data.Obj("old", new Dictionary<string, object>(Data.Map(row)), "targetId", targetId, "fileId", fileId);
                     Store.State["downloadReplacements"] = replacements; Store.Save();
                     try {
-                        details.Remove(domain + ":" + modId);
-                        if (authorize != null) {
-                            if (!QueueDownloadAuthorization(domain, modId, fileId, target, authorize)) throw new InvalidOperationException("The newer file is already being prepared.");
+                        if (completed != null) CompleteDownloadReplacement(completed, delete);
+                        else if (!downloading) {
+                            details.Remove(domain + ":" + modId);
+                            if (authorize != null) {
+                                if (!QueueDownloadAuthorization(domain, modId, fileId, target, authorize)) throw new InvalidOperationException("The newer file is already being prepared.");
+                            }
+                            else await AuthorizeDownload(domain, modId, fileId);
                         }
-                        else await AuthorizeDownload(domain, modId, fileId);
                     }
                     catch { replacements.Remove(id); Store.Save(); throw; }
-                    Data.Map(update)["dismissed"] = true;
-                    var dismissed = Data.Map(Data.Get(Store.State, "dismissedDownloadUpdates")); dismissed[id] = Data.Str(update, "updateKey"); Store.State["dismissedDownloadUpdates"] = dismissed;
+                    DismissDownloadedUpdate(update);
                 }
                 Store.Save(); Emit(); return Store.PublicState();
             }

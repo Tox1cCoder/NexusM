@@ -61,7 +61,7 @@ namespace NexusM
                     if (DownloadAuthorizationPending(domain + ":" + modId + ":" + fileId)) {
                         result["status"] = "alreadyQueued"; result["reason"] = "This file is already being prepared or downloaded.";
                     }
-                    else { result["eligible"] = true; result["status"] = "eligible"; result["file"] = file; }
+                    else { result["eligible"] = true; result["status"] = "eligible"; result["file"] = file; result["fileResponse"] = response; }
                 }
             }
             catch (OperationCanceledException) { throw; }
@@ -84,7 +84,7 @@ namespace NexusM
         }
 
         private static object PublicBatchCandidate(Dictionary<string, object> candidate) {
-            var result = new Dictionary<string, object>(candidate); result.Remove("file"); return result;
+            var result = new Dictionary<string, object>(candidate); result.Remove("file"); result.Remove("fileResponse"); return result;
         }
 
         private async Task<object> GetBatchDownloadCandidates(object value) {
@@ -110,6 +110,7 @@ namespace NexusM
                         object raw = Data.Get(candidate, "file");
                         long size = Data.Num(raw, "size_in_bytes"); if (size == 0) size = Data.Num(raw, "size_kb") * 1024; if (size == 0) size = Data.Num(raw, "size") * 1024;
                         var file = Data.Obj("name", Data.Str(raw, "name"), "size", size);
+                        await NotifyDownloadingUpdate(Data.Str(candidate, "gameDomain"), Data.Num(candidate, "modId"), Data.Num(candidate, "fileId"), Data.Get(candidate, "fileResponse"));
                         bool added = QueueDownloadAuthorization(Data.Str(candidate, "gameDomain"), Data.Num(candidate, "modId"), Data.Num(candidate, "fileId"), file, authorize);
                         candidate["status"] = added ? "queued" : "alreadyQueued";
                         if (added) queued++;

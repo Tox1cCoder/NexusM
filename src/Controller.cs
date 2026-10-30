@@ -488,7 +488,7 @@ namespace NexusM
             await ImportHistory(imported);
             Store.State["notice"] = "Imported " + imported.Count + " mod links. This text did not include reliable download dates; use the Nexus history importer to preserve them."; Store.Save();
         }
-        private async Task AuthorizeDownload(string domain, long modId, long fileId) {
+        internal async Task AuthorizeDownload(string domain, long modId, long fileId, Action<string, string> authorize = null) {
             RequireFolderAvailable(); RequireApi(); domain = JsonTools.Domain(domain); if (modId <= 0 || fileId <= 0) throw new ArgumentException("Choose a mod file first.");
             string id = domain + ":" + modId + ":" + fileId;
             CheckRetryWindow(Store.Downloads.FirstOrDefault(row => Data.Str(row, "id") == id));
@@ -502,7 +502,8 @@ namespace NexusM
             var file = Data.List(Data.Get(detail, "files")).FirstOrDefault(x => Data.Num(x, "fileId") == fileId);
             if (file == null) throw new ArgumentException("This file is no longer listed by Nexus.");
             if (Data.Str(file, "category").Equals("ARCHIVED", StringComparison.OrdinalIgnoreCase) || Data.Str(file, "category").Equals("DELETED", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("This file is unavailable. Choose an active file or open its Nexus page.");
-            if (!QueueDownloadAuthorization(domain, modId, fileId, file, null)) throw new InvalidOperationException("This file is already being prepared or downloaded.");
+            await NotifyDownloadingUpdate(domain, modId, fileId);
+            if (!QueueDownloadAuthorization(domain, modId, fileId, file, authorize)) throw new InvalidOperationException("This file is already being prepared or downloaded.");
         }
         internal async Task ReceiveNxm(string uri) {
             RequireFolderAvailable(); RequireApi(); var request = DownloadRequest.ParseNxm(uri, Folder); string id = request.Id;
@@ -519,6 +520,7 @@ namespace NexusM
             window.NextAuthorization();
             try {
                 Directory.CreateDirectory(downloadFolder);
+                await NotifyDownloadingUpdate(request.Domain, request.ModId, request.FileId, null, cancellation.Token);
                 object result = await downloader.DownloadNxmAsync(uri, downloadFolder, cancellation.Token);
                 if (disposed) return;
                 var final = Data.Map(result);
