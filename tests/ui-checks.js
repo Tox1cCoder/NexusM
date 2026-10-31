@@ -19,6 +19,7 @@
   const previewRequests = new Map();
   const fileDownloadRequests = new Map();
   let deferFileDownloads = false;
+  let removeModRequest = null;
   const settle = () => new Promise(resolve => setTimeout(resolve,0));
   const check = async (name, test) => {
     try {await test();report.checks.push({test:name,passed:true});}
@@ -96,6 +97,7 @@
         else if(message.action==='getFileContents'){requests.push(message);previewRequests.set(String(message.id),message);}
         else if(message.action==='getBatchDownloadCandidates'){requests.push(message);batchCandidateRequests.set(String(message.id),message);}
         else if(message.action==='startBatchDownload'){requests.push(message);batchDownloadRequest=message;}
+        else if(message.action==='removeMod'){requests.push(message);removeModRequest=message;}
         else if(['dismissDownloadUpdate','replaceDownloadUpdate','deleteDownloadUpdate'].includes(message.action)){requests.push(message);downloadUpdateRequest=message;}
         else if(message.action==='checkDownloadUpdates'){requests.push(message);downloadUpdateCheckRequest=message;}
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
@@ -383,6 +385,21 @@
           await window.NexusM.showMod('game1:2');
           expect(content.scrollTop===0,'Opening another mod must reveal its title and tabs instead of the previous reading position.');
         }finally{if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();}
+      });
+      await check('failed mod removal keeps its details open and reports only the failure',async()=>{
+        try{
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          $('.toasts').replaceChildren();
+          $('[data-remove-mod="game1:1"]').click();
+          expect(removeModRequest?.payload.modId===1&&!$('#detail-panel').classList.contains('hidden'),'Removal must keep details open until the host confirms success.');
+          window.NexusM.receive({id:removeModRequest.id,ok:false,error:'The library could not be saved.'});removeModRequest=null;await settle();
+          expect(!$('#detail-panel').classList.contains('hidden')&&$('[data-mod-key="game1:1"]'),'Failed removal must retain the mod and its details for retry.');
+          expect($('.toasts').textContent.includes('could not be saved')&&!$('.toasts').textContent.includes('Mod removed'),'A failed removal must never announce success.');
+          $('[data-remove-mod="game1:1"]').click();
+          window.NexusM.receive({id:removeModRequest.id,ok:true,result:{mods:fixture.mods.filter(mod=>mod.modId!==1)}});removeModRequest=null;await settle();
+          expect($('#detail-panel').classList.contains('hidden')&&!$('[data-mod-key="game1:1"]'),'Successful removal must close details and update the library.');
+          expect($('.toasts').textContent.includes('Mod removed from your local library.'),'Confirmed removal should announce success.');
+        }finally{if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();window.NexusM.setState(fixture);}
       });
       await check('multiple main files and optional files stay separate',async()=>{
         await window.NexusM.showMod('game1:1');
@@ -1157,6 +1174,7 @@
     } catch(error) {report.checks.push({test:'UI fixture setup',passed:false,error:error.message});}
     finally {
       if(refreshRequest)window.NexusM.receive({id:refreshRequest.id,ok:false,error:'UI fixture ended.'});
+      if(removeModRequest)window.NexusM.receive({id:removeModRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderClearRequest)window.NexusM.receive({id:folderClearRequest.id,ok:false,error:'UI fixture ended.'});
       if(folderSaveRequest)window.NexusM.receive({id:folderSaveRequest.id,ok:false,error:'UI fixture ended.'});
       if(queueSettingsRequest)window.NexusM.receive({id:queueSettingsRequest.id,ok:false,error:'UI fixture ended.'});

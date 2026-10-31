@@ -750,7 +750,7 @@
     if(target.dataset.downloadFolder){run('openFolder',{id:target.dataset.downloadFolder});return;}
     if(target.dataset.reviewDownloadUpdate){const update=state.downloadUpdates.find(update=>update.id===target.dataset.reviewDownloadUpdate);if(update)showDownloadUpdate(update);return;}
     if(target.dataset.addResult){const result=await run('addGame',{query:target.dataset.addResult},target);if(result!==null)$('#input-dialog').close();return;}
-    if(target.dataset.removeMod){const mod=detail?.mod;closeDetail();if(mod){consume(await run('removeMod',{gameDomain:modDomain(mod),modId:modId(mod)}));toast('Mod removed from your local library.');}return;}
+    if(target.dataset.removeMod){const mod=detail?.mod,token=detailToken;if(mod){const result=await run('removeMod',{gameDomain:modDomain(mod),modId:modId(mod)},target);if(result!==null){if(detailToken===token)closeDetail();toast('Mod removed from your local library.');}}return;}
     const handlers={
       'refresh-button':()=>checkUpdates('refresh',activeGame?{gameDomain:activeGame}:{}),
       'add-game-button':addGame,'game-strip-add':addGame,'add-mod-button':addMod,'empty-add':addMod,
