@@ -47,14 +47,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The workflow's main-branch concurrency lock spans publishing, so
+          # checkout sees tags from the preceding completed main release.
+          fetch-depth: 0
 
-      - name: Build Windows app with a unique version for main pushes
+      - name: Build Windows app with the next plain version for main pushes
         env:
           AUTOMATIC_RELEASE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           . .\tools\Build-Version.ps1
-          $runNumber = if ($env:AUTOMATIC_RELEASE -eq 'true') { $env:GITHUB_RUN_NUMBER } else { '' }
-          $version = Get-NexusMBuildVersion (Join-Path $env:GITHUB_WORKSPACE 'src\AssemblyInfo.cs') $runNumber
+          $tags = @(git tag --list)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read existing version tags.' }
+          $commitTags = @(git tag --points-at HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read version tags for this commit.' }
+          $automatic = $env:AUTOMATIC_RELEASE -eq 'true'
+          $version = Get-NexusMBuildVersion (Join-Path $env:GITHUB_WORKSPACE 'src\AssemblyInfo.cs') -Automatic:$automatic -ExistingTags $tags -CommitTags $commitTags
           .\build.ps1 -AppVersion $version.AssemblyVersion
 
       - name: Ensure WebView2 Runtime is installed

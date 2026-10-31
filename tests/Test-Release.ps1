@@ -90,12 +90,13 @@ try {
     $server.Calls.Clear(); $result = Publish-With $server $directory $otherCommit
     Assert-Release ($result.Status -eq 'Already published' -and $server.Calls.Count -eq 1 -and $server.Calls[0].Method -eq 'GET') 'Further pushes at the same app version leave its release and tag unchanged'
 
-    foreach ($number in @(6, 7)) {
-        $autoVersion = '1.5.1.' + $number
-        $automatic = New-Package ('automatic-' + $number) $autoVersion
+    foreach ($autoVersion in @('1.5.3', '1.5.4', '1.5.1.6')) {
+        $automatic = New-Package ('automatic-' + $autoVersion) $autoVersion
         $server = New-Server
         $result = Publish-With $server $automatic $commit ('v' + $autoVersion)
-        Assert-Release ($result.Status -eq 'Published' -and $result.Tag -ceq ('v' + $autoVersion)) ('An automatic build publishes independently without a source version bump: ' + $autoVersion)
+        Assert-Release ($result.Status -eq 'Published' -and $result.Tag -ceq ('v' + $autoVersion)) ('A plain or legacy automatic version publishes with its exact tag: ' + $autoVersion)
+        $create = @($server.Calls | Where-Object { $_.Method -eq 'POST' -and $_.Path -like '*/releases' })[0]
+        Assert-Release ($create.Body.name -ceq ('NexusM ' + $autoVersion)) 'The release title uses the same version as its ZIP and tag'
         $last = $server.Calls[$server.Calls.Count - 1]
         Assert-Release ($last.Body.make_latest -ceq 'true') 'A new automatic build becomes the Latest download'
         $server.Calls.Clear(); $result = Publish-With $server $automatic $commit ('v' + $autoVersion)
@@ -105,6 +106,13 @@ try {
     $automatic = New-Package 'delayed-automatic' '1.5.1.8'
     $result = Publish-With $server $automatic $commit 'v1.5.1.8'
     Assert-Release ($result.Status -eq 'Published' -and $server.Calls[$server.Calls.Count - 1].Body.make_latest -ceq 'false') 'Recovering an older failed draft does not move Latest behind a newer build'
+    $plain = New-Package 'plain-patch' '1.5.3'
+    $server = New-Server; $server.Latest = @{ tag_name = 'v1.5.2.11' }
+    $result = Publish-With $server $plain $commit 'v1.5.3'
+    Assert-Release ($result.Status -eq 'Published' -and $server.Calls[$server.Calls.Count - 1].Body.make_latest -ceq 'true') 'A plain patch release advances Latest beyond legacy four-part builds'
+    $server = New-Server; $server.Latest = @{ tag_name = 'v1.5.4' }
+    $result = Publish-With $server $plain $commit 'v1.5.3'
+    Assert-Release ($result.Status -eq 'Published' -and $server.Calls[$server.Calls.Count - 1].Body.make_latest -ceq 'false') 'Recovering an older plain release preserves the newer Latest download'
     foreach ($invalidVersion in @('01.5.1', '1.5.1.0', '1.5.1.65535')) {
         $invalid = New-Package ('invalid-' + $invalidVersion) $invalidVersion
         Assert-ReleaseRejected { Get-NexusMReleasePackage $invalid } ('Noncanonical or unsupported app versions cannot publish: ' + $invalidVersion)
@@ -153,7 +161,8 @@ try {
     Assert-Release ($workflow -match '(?s)  release-tests:.*?runs-on: ubuntu-latest.*?shell: pwsh.*?run:.*?tests/Test-Release.ps1') 'Publisher fixtures also run under the production Linux PowerShell runtime'
     Assert-Release ($workflow -match "if: github.event_name == 'push' && \(github.ref == 'refs/heads/main'" -and $workflow -match 'persist-credentials: false') 'Pull requests cannot run the publishing job or retain checkout credentials'
     Assert-Release ($workflow -match "cancel-in-progress: \`$\{\{ github.event_name == 'pull_request' \}\}" -and $workflow -match 'group: publish-\$\{\{ needs.build.outputs.release_tag \}\}') 'Main releases cannot be cancelled halfway through publishing and duplicate versions are serialized'
-    Assert-Release ($workflow -match "AUTOMATIC_RELEASE: \`$\{\{ github.event_name == 'push' && github.ref == 'refs/heads/main' \}\}" -and $workflow -match 'GITHUB_RUN_NUMBER' -and $workflow -match 'build.ps1 -AppVersion') 'Each main push gets its own compiled version before tests and packaging'
+    Assert-Release ($workflow -match "AUTOMATIC_RELEASE: \`$\{\{ github.event_name == 'push' && github.ref == 'refs/heads/main' \}\}" -and $workflow -match 'fetch-depth: 0' -and $workflow -match 'git tag --list' -and $workflow -match 'git tag --points-at HEAD' -and $workflow -match 'build.ps1 -AppVersion') 'Main pushes allocate a plain version from fetched tags before tests and packaging'
+    Assert-Release ($workflow -match 'group: windows-ci-\$\{\{ github.workflow \}\}-\$\{\{ github.ref \}\}' -and $workflow -notmatch 'GITHUB_RUN_NUMBER') 'The main workflow serializes tag allocation through publishing without exposing run numbers'
     Write-Host ('Passed ' + $script:checks + ' release automation checks; no real GitHub requests were made.')
 }
 finally {

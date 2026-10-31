@@ -171,7 +171,7 @@ The icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -
 
 Push your changes to `main`. **Windows CI** assigns a new build version, builds and tests that commit, verifies the package checksum, creates the matching tag, and publishes the ZIP, SHA-256 checksum, and release notes under [Releases](https://github.com/Tox1cCoder/NexusM/releases). No manual version edit, tag, release creation, personal Nexus API key, or repository secret is required.
 
-Automatic versions append GitHub's workflow run number to the source version. For example, source `1.5.1.0` built by run 42 publishes `v1.5.1.42` with `NexusM-1.5.1.42-windows-x64.zip`. The executable and Settings display the same version. Each new main push has a different number; rerunning a workflow retains its number and leaves an already published release unchanged. Version stamping changes only generated build files. You can still update the source major, minor, or patch version when planning a named release.
+Automatic releases use a plain `major.minor.patch` version everywhere. The source version is a floor: with source `1.5.2.0` and existing `v1.5.2.*` releases, the next main build publishes `v1.5.3` with `NexusM-1.5.3-windows-x64.zip`, followed by `1.5.4`. Settings and the release title show the same plain version; Windows stores the equivalent `1.5.3.0`. CI reads existing tags after the preceding main workflow finishes, and reruns reuse the plain version already reserved for their commit. Existing releases and four-part legacy tags stay unchanged. Version stamping changes only generated build files. Increase the source major or minor to start a new release line, or set a higher patch as the next release floor.
 
 Pull requests, version tags, and manual **Windows CI** runs also build, test, and upload a `nexusm-windows-x64` artifact containing the ZIP and checksum. Pull requests and manual runs do not publish. Build jobs have read-only repository access; only the publishing job can create a tag or release using GitHub's built-in workflow token. Publisher fixtures run on both Windows PowerShell and Linux PowerShell before publishing.
 
@@ -179,7 +179,7 @@ Manually pushing a matching `v<version>` tag is still supported for a named sour
 
 For a local package after building, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Package-Release.ps1`. Output goes to `artifacts\release`. Packaging uses an explicit app-file list and refuses to overwrite an existing package; choose a fresh `-OutputDirectory` for another local run.
 
-To reproduce a particular automatic version locally, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion 1.5.1.42`. An optional `-OutputDirectory` keeps that build in a separate folder. All four numeric components must be between 0 and 65534, as required by the Windows assembly version format.
+To reproduce a particular automatic version locally, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -AppVersion 1.5.3`. An optional `-OutputDirectory` keeps that build in a separate folder. Numeric components must be between 0 and 65534, as required by the Windows assembly version format. Legacy four-part versions remain accepted for reproducing older builds.
 
 ---
 
