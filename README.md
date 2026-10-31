@@ -33,7 +33,7 @@ Your saved library appears when the app opens. Once connected, NexusM syncs your
 
 Adding or removing a game changes your local list. It keeps the game's mod history and does not change your favourites on the Nexus website.
 
-New mods downloaded outside NexusM need another history import or **Add mod**. Update checks can retrieve newer account download dates for mods already in your library.
+New mods downloaded outside NexusM need another history import or **Add mod**, even when their game has already synced. Game sync imports your favourite games; update checks retrieve current information and newer account download dates for mods already in your library. Select a game with no imported mods and choose **Import this game’s history** to open its Nexus history window directly. Sign in to the same Nexus account you use in your browser, wait for Download history to load, then press **Import history** in that window.
 
 ## Download a mod file
 

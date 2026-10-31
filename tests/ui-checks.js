@@ -99,6 +99,10 @@
         else if(['dismissDownloadUpdate','replaceDownloadUpdate','deleteDownloadUpdate'].includes(message.action)){requests.push(message);downloadUpdateRequest=message;}
         else if(message.action==='checkDownloadUpdates'){requests.push(message);downloadUpdateCheckRequest=message;}
         else if(message.action==='refresh'){requests.push(message);refreshRequest=message;}
+        else if(message.action==='importWebsite'){
+          requests.push(message);
+          queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{opened:true}}));
+        }
         else if(message.action==='saveSettings'&&typeof message.payload.yourGamesOnly==='boolean'){
           requests.push(message);
           queueMicrotask(()=>window.NexusM.receive({id:message.id,ok:true,result:{settings:{yourGamesOnly:message.payload.yourGamesOnly}}}));
@@ -269,6 +273,39 @@
       await check('game selection scopes the table',()=>{
         $('[data-select-game="game1"]').click();expect($$('#mods-body tr[data-mod-key]').length===2,'Game filter should show two mods.');
         $('[data-select-game=""]').click();
+      });
+      await check('newly synced games explain missing browser history and open the selected import',async()=>{
+        const game={id:100,domain:'phantombladezero',name:'Phantom Blade Zero'};
+        try{
+          window.NexusM.receive({event:'state',data:{games:[...fixture.games,game]}});
+          $('[data-select-game="phantombladezero"]').click();
+          expect(!$('#library-empty').classList.contains('hidden')&&$('#mods-table-wrap').classList.contains('hidden'),'A synced game without imported records needs its own actionable empty state.');
+          expect($('#library-empty h3').textContent==='No mods imported for Phantom Blade Zero','The empty state must identify the selected game.');
+          expect($('#library-empty p').textContent.includes('downloaded in your browser')&&$('#library-empty p').textContent.includes('already in your library'),'The empty state must explain game sync, history import, and the scope of update checks.');
+          expect($('#empty-import').textContent==='Import this game’s history'&&$('#empty-add'),'The selected game needs direct history import and Add a mod actions.');
+          $('#empty-import').click();
+          $('[data-select-game="game9"]').click();
+          await settle();
+          const request=requests.filter(request=>request.action==='importWebsite').at(-1);
+          expect(request?.payload.kind==='history'&&request.payload.gameDomain==='phantombladezero','Direct import must use the game selected when clicked, even if the selection changes while opening.');
+          expect(!$('#input-dialog').open,'Direct game history import must not require an intermediate app dialog.');
+          $('[data-select-game="phantombladezero"]').click();
+          const mod={gameDomain:game.domain,modId:10,name:'Imported Phantom Blade mod',version:'1.0',lastDownloadedAt:1792500000,updatedAt:1792400000,needsReview:false};
+          window.NexusM.receive({event:'state',data:{mods:[...fixture.mods,mod]}});
+          expect($('#library-empty').classList.contains('hidden')&&!$('#mods-table-wrap').classList.contains('hidden'),'Imported records must replace the empty state while retaining the selected game.');
+          expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='phantombladezero:10','The selected game must immediately display its imported mod.');
+        }finally{window.NexusM.setState(fixture);}
+      });
+      await check('search and review filters keep their normal no-results state for imported games',()=>{
+        try{
+          $('[data-select-game="game1"]').click();
+          $('#mod-search').value='a search that matches nothing';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+          expect($('#library-empty').classList.contains('hidden')&&!$('#mods-table-wrap').classList.contains('hidden')&&$('#mods-body .no-results'),'A search hiding known mods must remain a filter result, not ask for another history import.');
+          $('#mod-search').value='';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+          window.NexusM.setState({mods:fixture.mods.map(mod=>({...mod,needsReview:false}))});
+          $('[data-filter="updates"]').click();
+          expect($('#library-empty').classList.contains('hidden')&&$('#mods-body .no-results'),'An imported game without updates must remain a review-filter result.');
+        }finally{$('#mod-search').value='';$('[data-filter="all"]').click();$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
       });
       await check('keyboard focus reveals each game removal control',()=>{
         const game=$('[data-select-game="game1"]'),remove=game.closest('.game-card').querySelector('[data-remove-game]');
@@ -1075,6 +1112,10 @@
         window.NexusM.setState({games:[],mods:[],downloads:[]});window.NexusM.navigate('library');
         expect(!$('#library-empty').classList.contains('hidden'),'Empty library should display the import state.');
         expect($('#empty-import')&&$('#empty-add'),'Empty library needs import and add controls.');
+        expect($('#empty-import').textContent==='Import download history','Returning to the whole library must restore the global import action.');
+        $('#empty-import').click();
+        expect($('#input-dialog').open&&$('#dialog-website-import'),'Whole-library import must retain its existing website and pasted-history choices.');
+        $('#dialog-cancel').click();
         expect($('#clear-downloads-button').disabled,'An empty download list should not offer a clear action.');
       });
     } catch(error) {report.checks.push({test:'UI fixture setup',passed:false,error:error.message});}
