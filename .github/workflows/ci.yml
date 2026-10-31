@@ -125,6 +125,7 @@ jobs:
           path: |
             artifacts/*-tests.json
             artifacts/ui-tests.png
+            artifacts/library-layout.png
           if-no-files-found: ignore
           retention-days: 7
 

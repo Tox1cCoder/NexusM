@@ -73,9 +73,30 @@ namespace NexusM
                     result = Data.Json.DeserializeObject(await browser.ExecuteScriptAsync("window.__uiChecks || {}"));
                     if (Data.Str(result, "status") == "complete") break;
                 }
-                passed = Data.Str(result, "status") == "complete" && Data.Bool(result, "passed");
                 var checks = Data.List(Data.Get(result, "checks"));
                 checks.Insert(0, Data.Obj("test", "UI readiness precedes saved-library and account work", "passed", true));
+                await browser.ExecuteScriptAsync("document.querySelector('.toasts').replaceChildren()");
+                foreach (int width in new[] { 980, 1100, 1340, 1600 })
+                {
+                    ClientSize = new System.Drawing.Size(width, 880);
+                    await Task.Delay(100);
+                    checks.Add(Data.Json.DeserializeObject(await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "library-layout-checks.js")))));
+                    if (width == 1100)
+                    {
+                        await browser.ExecuteScriptAsync("document.querySelector('.mods-section').scrollIntoView({block:'start'})");
+                        using (var image = File.Create(Path.Combine(workspace, "artifacts", "library-layout.png")))
+                            await browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);
+                        await browser.ExecuteScriptAsync("window.scrollTo(0,0)");
+                    }
+                }
+                browser.ZoomFactor = 1.25;
+                ClientSize = new System.Drawing.Size(1600, 880);
+                await Task.Delay(100);
+                checks.Add(Data.Json.DeserializeObject(await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "library-layout-checks.js")))));
+                browser.ZoomFactor = 1;
+                ClientSize = new System.Drawing.Size(1340, 880);
+                passed = Data.Str(result, "status") == "complete" && Data.Bool(result, "passed");
+                foreach (object check in checks) if (!Data.Bool(check, "passed")) passed = false;
                 File.WriteAllText(report, Data.Json.Serialize(Data.Obj("passed", passed, "checks", checks)));
                 await browser.ExecuteScriptAsync("document.querySelector('.toasts').replaceChildren(); window.NexusM.navigate('settings')");
                 using (var image = File.Create(Path.ChangeExtension(report, ".png")))
