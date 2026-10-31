@@ -50,6 +50,16 @@ namespace NexusM
             startupTimer.Tick += delegate { CheckStartupTimeout(DateTime.UtcNow); };
             FormClosing += delegate { closing = true; startupTimer.Stop(); startupTimer.Dispose(); foreach (var browser in browsers.ToArray()) browser.Close(); Controller.Dispose(); if (activePipe != null) activePipe.Dispose(); };
         }
+        protected override void OnLoad(EventArgs e) {
+            base.OnLoad(e);
+            // Apply the monitor's usable bounds after Windows has scaled the form.
+            FitToWorkingArea(Screen.FromControl(this).WorkingArea);
+        }
+        internal void FitToWorkingArea(Rectangle workingArea) {
+            MinimumSize = new Size(Math.Min(980, workingArea.Width), Math.Min(680, workingArea.Height));
+            Size = new Size(Math.Min(Width, workingArea.Width), Math.Min(Height, workingArea.Height));
+            Location = new Point(workingArea.Left + (workingArea.Width - Width) / 2, workingArea.Top + (workingArea.Height - Height) / 2);
+        }
         private void CreateInterface() {
             web = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = BackColor };
             Controls.Add(web); web.SendToBack();

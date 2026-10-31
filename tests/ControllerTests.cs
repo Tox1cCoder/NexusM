@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -26,6 +27,7 @@ namespace NexusM
             string report = args.Length > 0 ? Path.GetFullPath(args[0]) : Path.Combine(Environment.CurrentDirectory, "controller-tests.json");
             try
             {
+                Check("initial window and minimum size fit small and secondary-monitor working areas", TestWindowFit);
                 Check("backup restores game and mod metadata, dates, review state, and local game ownership", TestRestore);
                 Check("successful file history survives restore independently from the queue", TestFileHistory);
                 Check("import merges newer download and reviewed dates without rollback or duplicates", TestDateMerge);
@@ -90,6 +92,28 @@ namespace NexusM
         private static Storage NewStore(string name)
         {
             return new Storage(Path.Combine(root, name));
+        }
+
+        private static void TestWindowFit()
+        {
+            var workingAreas = new[] { new Rectangle(0, 0, 1920, 1040), new Rectangle(0, 0, 1280, 680), new Rectangle(0, 0, 800, 560), new Rectangle(-1280, 40, 1280, 680), new Rectangle(1920, 0, 800, 560) };
+            int index = 0;
+            foreach (Rectangle area in workingAreas)
+            {
+                using (var form = new MainForm(NewStore("window-fit-" + index++), null, null, "window-fit-fixture"))
+                {
+                    try
+                    {
+                        form.FitToWorkingArea(area);
+                        Expect(area.Contains(form.Bounds), "The initial window extends outside its monitor's usable area.");
+                        Expect(form.Width == Math.Min(1340, area.Width) && form.Height == Math.Min(880, area.Height), "The initial window did not retain the requested size where it fits.");
+                        Expect(form.MinimumSize.Width == Math.Min(980, area.Width) && form.MinimumSize.Height == Math.Min(680, area.Height), "The window minimum prevents it from fitting this monitor.");
+                        Expect(form.Left == area.Left + (area.Width - form.Width) / 2 && form.Top == area.Top + (area.Height - form.Height) / 2, "The fitted window was not centered on its own monitor.");
+                        Expect(form.Controller.Api == null && !form.InterfaceReady, "The window sizing fixture must not initialize the browser or account.");
+                    }
+                    finally { form.Controller.Dispose(); }
+                }
+            }
         }
 
         private static void WithController(Storage storage, Action<Controller> test)
