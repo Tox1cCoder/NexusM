@@ -163,6 +163,14 @@
         expect(!$('#mods-body').innerText.includes('Preserved old-game history'),'Removed-game history should stay hidden while Your games only is enabled.');
         expect($('#your-games-only').getAttribute('aria-pressed')==='true','Your games only should default to enabled.');
       });
+      await check('sidebar navigation identifies each destination and the current page',()=>{
+        for(const page of ['downloads','settings','library']){
+          window.NexusM.navigate(page);
+          const current=$$('.nav-item[aria-current="page"]');
+          expect(current.length===1&&current[0].dataset.page===page,'Navigation must identify exactly one current page.');
+          expect($$('.nav-item').every(button=>button.getAttribute('aria-label')&&button.title),'Collapsed navigation needs accessible names and visible hover labels.');
+        }
+      });
       await check('library checkboxes inspect only selected mods without opening details',async()=>{
         const before=requests.filter(request=>request.action==='getBatchDownloadCandidates').length;
         const detailsBefore=requests.filter(request=>request.action==='getModDetails').length;
@@ -364,6 +372,16 @@
           last.disabled=false;key(document.activeElement,'Escape');
           expect($('#detail-panel').classList.contains('hidden')&&document.activeElement===opener,'Escape should close details and return focus to the library opener.');
           expect(!$('main').inert&&!$('.sidebar').inert,'Closing details must restore background interaction.');
+        }finally{if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();}
+      });
+      await check('opening another mod starts its details at the top',async()=>{
+        const content=$('#detail-content');
+        try{
+          await window.NexusM.showMod('game1:1');
+          content.scrollTop=content.scrollHeight;
+          expect(content.scrollTop>0,'The details fixture must be long enough to scroll.');
+          await window.NexusM.showMod('game1:2');
+          expect(content.scrollTop===0,'Opening another mod must reveal its title and tabs instead of the previous reading position.');
         }finally{if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();}
       });
       await check('multiple main files and optional files stay separate',async()=>{
@@ -607,7 +625,24 @@
           expect(!content.innerHTML.includes('</p><br><p>'),'HTML indentation between paragraphs must not add blank lines.');
         }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
       });
-      await check('wide author tables and code scroll within the details panel',async()=>{
+      await check('reflowed author tables retain header relationships and safe spans',async()=>{
+        const original=fakeDetails.mod.description;
+        try{
+          fakeDetails.mod.description='<table><thead><tr><th>Variant</th><th>File &amp; &lt;path&gt; &quot;safe&quot;</th><th>Version</th><th>Size</th><th>Install</th><th>Notes</th></tr></thead><tbody><tr><th scope="row" rowspan="2">Base</th><td colspan="2">archive.zip</td><td>10 MB</td><td>Install first</td><td><table><tr><th>Nested only</th></tr><tr><td>Nested value</td></tr></table></td></tr><tr><td>Patch.zip</td><td>2.0</td><td>5 MB</td><td>After base</td><td>Patch note</td></tr></tbody></table><table><tr><td colspan="999" rowspan="0">Invalid spans</td><td colspan="2foo">Invalid integer</td></tr></table>';
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const tables=$$('#detail-tab-body table'),table=tables[0],rows=[...table.querySelectorAll('tr')].filter(row=>row.closest('table')===table);
+          expect(table.getAttribute('role')==='table'&&rows.every(row=>row.getAttribute('role')==='row'),'Wrapped tables must preserve their table and row semantics.');
+          expect([...table.children].every(group=>group.getAttribute('role')==='rowgroup'),'Table sections must retain their row-group semantics.');
+          expect([...rows[0].cells].every(cell=>cell.getAttribute('role')==='columnheader'),'The six column headers must remain identifiable.');
+          expect(rows[1].cells[0].getAttribute('role')==='rowheader'&&rows[1].cells[0].rowSpan===2,'An explicit row header and its bounded row span must survive.');
+          expect(rows[1].cells[1].getAttribute('data-column-label')==='File & <path> "safe" / Version'&&rows[1].cells[1].colSpan===2,'A spanning value must keep the plain-text labels of its columns.');
+          expect(rows[2].cells[0].getAttribute('data-column-label')==='File & <path> "safe"'&&rows[2].cells[0].getAttribute('aria-colindex')==='2','A row-spanning header must not shift the next row\'s column labels.');
+          expect(rows[1].cells[4].getAttribute('data-column-label')==='Notes'&&tables[1].querySelector('td').getAttribute('data-column-label')==='Nested only','Nested tables must use their own headers without replacing their parent\'s labels.');
+          expect([...tables[2].querySelectorAll('td')].every(cell=>!cell.hasAttribute('colspan')&&!cell.hasAttribute('rowspan')),'Out-of-range and malformed spans must be removed.');
+          expect(!table.querySelector('[onclick]')&&rows[1].cells[1].getAttribute('role')==='cell','Header labels must remain inert text on ordinary table cells.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('wide author tables and code reflow within the details panel',async()=>{
         const original=fakeDetails.mod.description;
         try{
           fakeDetails.mod.description=`<table><tr>${Array.from({length:48},(_,index)=>`<td>Column ${index}</td>`).join('')}</tr></table><pre><code>${'long_code_example_'.repeat(100)}</code></pre>`;
@@ -615,10 +650,11 @@
           const panel=$('#detail-panel'),table=$('#detail-tab-body table'),code=$('#detail-tab-body pre');
           expect(panel.scrollWidth<=panel.clientWidth+1,'Wide author content must not overflow the whole details panel.');
           for(const element of [table,code]){
-            expect(element.scrollWidth>element.clientWidth,'Wide tables and code examples need their own horizontal scroll area.');
-            element.focus();expect(document.activeElement===element,'Scrollable author content must be reachable by keyboard.');
-            element.scrollLeft=100;expect(element.scrollLeft>0,'Author content must scroll horizontally to expose the remaining text.');
+            expect(element.scrollWidth<=element.clientWidth+1,'Author tables and code examples must fit without horizontal scrolling.');
+            element.focus();expect(document.activeElement===element,'Author content must remain reachable by keyboard.');
           }
+          expect(table.querySelectorAll('td').length===48,'Reflow must preserve every table cell.');
+          expect(code.textContent==='long_code_example_'.repeat(100),'Wrapping must preserve the complete code example.');
         }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
       });
       await check('dictionary changelogs sort latest first and keep author note order',()=>{

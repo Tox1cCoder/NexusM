@@ -252,7 +252,7 @@
   function shortName(name){return String(name||'M').split(/[\s_-]+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();}
   function modUrl(mod){return imageUrl(mod.url)||`https://www.nexusmods.com/${encodeURIComponent(modDomain(mod))}/mods/${modId(mod)}`;}
   async function openUrl(url){if(!imageUrl(url))return;await run('openUrl',{url});}
-  function navigate(page){if(!['library','downloads','settings'].includes(page))return;currentPage=page;$$('.page').forEach(el=>el.classList.toggle('active',el.id===`page-${page}`));$$('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));document.documentElement.scrollTop=0;}
+  function navigate(page){if(!['library','downloads','settings'].includes(page))return;currentPage=page;$$('.page').forEach(el=>el.classList.toggle('active',el.id===`page-${page}`));$$('.nav-item').forEach(el=>{const active=el.dataset.page===page;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});document.documentElement.scrollTop=0;}
 
   function renderCounts(){
     $('#library-count').textContent=libraryMods().length;
@@ -533,10 +533,47 @@
       }
       if(node.tagName==='A'){const url=imageUrl(node.getAttribute('href'));if(url){out.setAttribute('href',url);out.setAttribute('data-external','true');}}
       if(node.tagName==='IMG'){const url=imageUrl(node.getAttribute('src'));if(!url)return document.createTextNode('');out.setAttribute('src',url);out.setAttribute('alt',node.getAttribute('alt')||'Mod image');out.setAttribute('loading','lazy');out.setAttribute('referrerpolicy','no-referrer');}
+      if(['TD','TH'].includes(node.tagName)){
+        for(const attribute of ['colspan','rowspan']){const span=Number(node.getAttribute(attribute));if(Number.isInteger(span)&&span>=1&&span<=100)out.setAttribute(attribute,String(span));}
+        const scope=node.getAttribute('scope');if(node.tagName==='TH'&&['row','col','rowgroup','colgroup'].includes(scope))out.setAttribute('scope',scope);
+      }
       for(const child of node.childNodes)out.append(clean(child));
       return out;
     }
-    const target=document.createElement('div');for(const child of parsed.body.childNodes)target.append(clean(child));return target.innerHTML;
+    const target=document.createElement('div');for(const child of parsed.body.childNodes)target.append(clean(child));
+    // Keep table relationships available after visual rows wrap. Labels come
+    // from this table's headers only, and enter the DOM as plain text.
+    for(const table of target.querySelectorAll('table')){
+      table.setAttribute('role','table');
+      for(const group of table.querySelectorAll('thead,tbody,tfoot'))if(group.closest('table')===table)group.setAttribute('role','rowgroup');
+      const rows=[...table.querySelectorAll('tr')].filter(row=>row.closest('table')===table);
+      const headerRow=rows.find(row=>[...row.cells].some(cell=>cell.tagName==='TH'&&!['row','rowgroup'].includes(cell.getAttribute('scope'))));
+      const headerIndex=rows.indexOf(headerRow),labels=[],occupied=[];
+      rows.forEach((row,rowIndex)=>{
+        row.setAttribute('role','row');let column=0;
+        for(const cell of row.cells){
+          const colspan=cell.colSpan,rowspan=cell.rowSpan;
+          while(Array.from({length:colspan},(_,offset)=>occupied[column+offset]>rowIndex).some(Boolean))column++;
+          const scope=cell.getAttribute('scope'),inHead=cell.closest('thead')?.closest('table')===table;
+          const rowHeader=['row','rowgroup'].includes(scope)||(!['col','colgroup'].includes(scope)&&row!==headerRow&&!inHead);
+          cell.setAttribute('role',cell.tagName==='TH'?(rowHeader?'rowheader':'columnheader'):'cell');
+          cell.setAttribute('aria-colindex',String(column+1));
+          if(colspan>1)cell.setAttribute('aria-colspan',String(colspan));
+          if(rowspan>1)cell.setAttribute('aria-rowspan',String(rowspan));
+          if(row===headerRow&&cell.tagName==='TH'&&!rowHeader){
+            const label=cell.cloneNode(true);for(const nested of label.querySelectorAll('table'))nested.remove();
+            const text=label.textContent.trim().replace(/\s+/g,' ');
+            for(let offset=0;offset<colspan;offset++)labels[column+offset]=text;
+          }else if(cell.tagName==='TD'&&headerIndex<rowIndex){
+            const label=[...new Set(labels.slice(column,column+colspan).filter(Boolean))].join(' / ');
+            if(label)cell.setAttribute('data-column-label',label);
+          }
+          for(let offset=0;offset<colspan;offset++)occupied[column+offset]=rowIndex+rowspan;
+          column+=colspan;
+        }
+      });
+    }
+    return target.innerHTML;
   }
 
   async function showMod(key){
@@ -545,7 +582,7 @@
     detail={mod,files:[],changelogs:{},requirements:[]};detailTab='files';selectedFiles.clear();filePreviews.clear();
     for(const background of $$('.sidebar,main'))background.inert=true;
     $('#detail-panel').classList.remove('hidden');$('#detail-scrim').classList.remove('hidden');document.body.style.overflow='hidden';$('#detail-close').focus();
-    $('#detail-breadcrumb').textContent=gameName(modDomain(mod)).toUpperCase();$('#detail-content').innerHTML='<div class="loading"><span class="spinner"></span>Getting the latest mod details…</div>';
+    $('#detail-breadcrumb').textContent=gameName(modDomain(mod)).toUpperCase();$('#detail-content').innerHTML='<div class="loading"><span class="spinner"></span>Getting the latest mod details…</div>';$('#detail-panel').scrollTop=0;$('#detail-content').scrollTop=0;
     const token=++detailToken;
     try{const result=await rpc('getModDetails',{gameDomain:modDomain(mod),modId:modId(mod)});if(token!==detailToken)return;detail={...detail,...result,mod:{...mod,...result?.mod},files:result?.files??[]};renderDetail();}
     catch(error){if(token===detailToken)$('#detail-content').innerHTML=`<div class="detail-tab-content"><h3>Couldn’t load this mod</h3><p class="subtle-empty">${esc(error.message)}</p><button class="button" data-detail-retry="${esc(key)}">Try again</button></div>`;}

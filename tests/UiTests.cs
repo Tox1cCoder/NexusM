@@ -96,12 +96,21 @@ namespace NexusM
                     await Task.Delay(100);
                     checks.Add(Data.Json.DeserializeObject(await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "library-layout-checks.js")))));
                 }
+                await CheckAppLayout(checks, 980, 700, 1);
+                await CheckAppLayout(checks, 1060, 500, 1);
+                await CheckAppLayout(checks, 1340, 880, 1);
+                await CheckAppLayout(checks, 1600, 900, 1);
+                await CheckAppLayout(checks, 980, 700, 1.25);
+                await CheckAppLayout(checks, 980, 700, 1.5);
+                await CheckAppLayout(checks, 980, 700, 2);
+                await CheckAppLayout(checks, 640, 700, 2);
                 browser.ZoomFactor = 1;
                 ClientSize = new System.Drawing.Size(1340, 880);
                 passed = Data.Str(result, "status") == "complete" && Data.Bool(result, "passed");
                 foreach (object check in checks) if (!Data.Bool(check, "passed")) passed = false;
                 File.WriteAllText(report, Data.Json.Serialize(Data.Obj("passed", passed, "checks", checks)));
                 await browser.ExecuteScriptAsync("document.querySelector('.toasts').replaceChildren(); window.NexusM.navigate('settings')");
+                await Task.Delay(200);
                 using (var image = File.Create(Path.ChangeExtension(report, ".png")))
                     await browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);
             }
@@ -116,6 +125,33 @@ namespace NexusM
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
             }
+        }
+
+        private async Task CheckAppLayout(List<object> checks, int width, int height, double zoom)
+        {
+            browser.ZoomFactor = zoom;
+            ClientSize = new System.Drawing.Size(width, height);
+            await Task.Delay(100);
+            bool capture = (width == 1340 && zoom == 1) || ((width == 980 || width == 640) && zoom == 2);
+            await browser.ExecuteScriptAsync("window.__captureAppLayout = " + (capture ? "true" : "false"));
+            await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "app-layout-checks.js")));
+            object result = null;
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                await Task.Delay(20);
+                result = Data.Json.DeserializeObject(await browser.ExecuteScriptAsync("window.__appLayoutChecks || {}"));
+                string scene = Data.Str(result, "capture");
+                if (capture && !String.IsNullOrEmpty(scene))
+                {
+                    string name = String.Format("app-layout-{0}-{1}-{2}.png", width, (int)(zoom * 100), scene);
+                    using (var image = File.Create(Path.Combine(workspace, "artifacts", name)))
+                        await browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);
+                    await browser.ExecuteScriptAsync("window.__resumeAppLayout && window.__resumeAppLayout()");
+                }
+                if (Data.Str(result, "status") == "complete") break;
+            }
+            if (Data.Str(result, "status") != "complete") throw new IOException("App layout fixtures did not complete.");
+            checks.AddRange(Data.List(Data.Get(result, "checks")));
         }
     }
 }
