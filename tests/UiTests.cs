@@ -76,7 +76,7 @@ namespace NexusM
                 var checks = Data.List(Data.Get(result, "checks"));
                 checks.Insert(0, Data.Obj("test", "UI readiness precedes saved-library and account work", "passed", true));
                 await browser.ExecuteScriptAsync("document.querySelector('.toasts').replaceChildren()");
-                foreach (int width in new[] { 980, 1100, 1340, 1600 })
+                foreach (int width in new[] { 980, 1060, 1070, 1100, 1120, 1340, 1370, 1380, 1600 })
                 {
                     ClientSize = new System.Drawing.Size(width, 880);
                     await Task.Delay(100);
@@ -89,10 +89,13 @@ namespace NexusM
                         await browser.ExecuteScriptAsync("window.scrollTo(0,0)");
                     }
                 }
-                browser.ZoomFactor = 1.25;
-                ClientSize = new System.Drawing.Size(1600, 880);
-                await Task.Delay(100);
-                checks.Add(Data.Json.DeserializeObject(await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "library-layout-checks.js")))));
+                foreach (double zoom in new[] { 1.25, 1.5, 2.0 })
+                {
+                    browser.ZoomFactor = zoom;
+                    ClientSize = new System.Drawing.Size(980, 880);
+                    await Task.Delay(100);
+                    checks.Add(Data.Json.DeserializeObject(await browser.ExecuteScriptAsync(File.ReadAllText(Path.Combine(workspace, "tests", "library-layout-checks.js")))));
+                }
                 browser.ZoomFactor = 1;
                 ClientSize = new System.Drawing.Size(1340, 880);
                 passed = Data.Str(result, "status") == "complete" && Data.Bool(result, "passed");
