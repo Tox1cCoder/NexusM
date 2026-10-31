@@ -28,6 +28,7 @@ namespace NexusM
             try
             {
                 Check("initial window and minimum size fit small and secondary-monitor working areas", TestWindowFit);
+                Check("Nexus browser instructions and actions reflow without clipping in small windows", TestBrowserWindowFit);
                 Check("backup restores game and mod metadata, dates, review state, and local game ownership", TestRestore);
                 Check("successful file history survives restore independently from the queue", TestFileHistory);
                 Check("import merges newer download and reviewed dates without rollback or duplicates", TestDateMerge);
@@ -113,6 +114,38 @@ namespace NexusM
                     }
                     finally { form.Controller.Dispose(); }
                 }
+            }
+        }
+
+        private static void TestBrowserWindowFit()
+        {
+            Storage storage = NewStore("browser-window-fit");
+            using (var parent = new MainForm(storage, null, null, "browser-window-fit-fixture"))
+            {
+                try
+                {
+                    foreach (bool history in new[] { false, true })
+                    foreach (Rectangle area in new[] { new Rectangle(0, 0, 1120, 840), new Rectangle(-800, 40, 800, 560), new Rectangle(1920, 0, 640, 480) })
+                    {
+                        using (var form = new BrowserForm(parent, null, "https://www.nexusmods.com/", history, "", storage))
+                        {
+                            form.Location = new Point(area.Left - 50, area.Top - 50);
+                            form.FitToWorkingArea(area); form.PerformLayout();
+                            Expect(area.Contains(form.Bounds), "The Nexus browser extends outside its monitor's usable area.");
+                            var toolbar = form.Controls.OfType<FlowLayoutPanel>().Single();
+                            var label = toolbar.Controls.OfType<Label>().Single();
+                            label.Text = String.Concat(Enumerable.Repeat("Sign in and complete the browser check before continuing. ", 12));
+                            toolbar.PerformLayout(); form.PerformLayout();
+                            Expect(label.Height >= label.PreferredHeight && label.Height > 25, "Long Nexus instructions must wrap into visible lines.");
+                            foreach (Control control in toolbar.Controls)
+                                Expect(toolbar.ClientRectangle.Contains(control.Bounds), "A Nexus browser action or instruction is clipped by the toolbar.");
+                            Expect(toolbar.Controls.OfType<Button>().Any(button => button.Text == "Open in browser"), "The external browser action must remain available.");
+                            if (history) Expect(toolbar.Controls.OfType<Button>().Any(button => button.Text == "Import history"), "History import must remain available.");
+                            Expect(form.Controls.OfType<Microsoft.Web.WebView2.WinForms.WebView2>().Single().CoreWebView2 == null, "The browser sizing fixture must not initialize WebView or use a website session.");
+                        }
+                    }
+                }
+                finally { parent.Controller.Dispose(); }
             }
         }
 

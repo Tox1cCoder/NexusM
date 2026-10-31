@@ -336,10 +336,11 @@ namespace NexusM
             Size = new Size(1120, 840); MinimumSize = new Size(800, 600); StartPosition = FormStartPosition.CenterParent;
             BackColor = Color.FromArgb(32, 33, 38); ForeColor = Color.White; Font = new Font("Segoe UI", 9F);
             browser.Dock = DockStyle.Fill; Controls.Add(browser);
-            var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = history ? 82 : 55, Padding = new Padding(10), BackColor = BackColor, AutoSize = false };
-            status.AutoSize = false; status.Width = 760; status.Height = 25;
+            var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10), BackColor = BackColor };
+            status.AutoSize = true; status.MaximumSize = new Size(760, 0);
             status.Text = history ? "Sign in to Nexus here, open your download history, then click Import history." : "Preparing your download through Nexus. Its normal free-download countdown still applies.";
-            toolbar.Controls.Add(status);
+            toolbar.Controls.Add(status); toolbar.SetFlowBreak(status, true);
+            toolbar.SizeChanged += delegate { status.MaximumSize = new Size(Math.Max(1, Math.Min(760, toolbar.ClientSize.Width - toolbar.Padding.Horizontal - status.Margin.Horizontal)), 0); };
             if (history) {
                 gameBox.DropDownStyle = ComboBoxStyle.DropDownList; gameBox.Width = 220; gameBox.Items.Add(new GameChoice("", "All games"));
                 foreach (var game in storage.Games) gameBox.Items.Add(new GameChoice(Data.Str(game, "domain"), Data.Str(game, "name")));
@@ -356,6 +357,15 @@ namespace NexusM
             downloadTimer.Tick += async delegate { CheckAuthorizationTimeout(DateTime.UtcNow); if (!authorizationEnded) await AdvanceDownload(); };
             FormClosed += delegate { downloadTimer.Stop(); downloadTimer.Dispose(); };
             Shown += async delegate { if (flowScript != null) downloadTimer.Start(); await Initialize(); };
+        }
+        protected override void OnLoad(EventArgs e) {
+            base.OnLoad(e);
+            FitToWorkingArea(Screen.FromControl(this).WorkingArea);
+        }
+        internal void FitToWorkingArea(Rectangle workingArea) {
+            MinimumSize = new Size(Math.Min(800, workingArea.Width), Math.Min(600, workingArea.Height));
+            Size = new Size(Math.Min(Width, workingArea.Width), Math.Min(Height, workingArea.Height));
+            Location = new Point(Math.Max(workingArea.Left, Math.Min(Left, workingArea.Right - Width)), Math.Max(workingArea.Top, Math.Min(Top, workingArea.Bottom - Height)));
         }
         private async Task Initialize() {
             try {
