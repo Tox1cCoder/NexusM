@@ -99,15 +99,21 @@ namespace NexusM
         {
             var workingAreas = new[] { new Rectangle(0, 0, 1920, 1040), new Rectangle(0, 0, 1280, 680), new Rectangle(0, 0, 800, 560), new Rectangle(-1280, 40, 1280, 680), new Rectangle(1920, 0, 800, 560) };
             int index = 0;
+            foreach (bool constrained in new[] { false, true })
             foreach (Rectangle area in workingAreas)
             {
                 using (var form = new MainForm(NewStore("window-fit-" + index++), null, null, "window-fit-fixture"))
                 {
                     try
                     {
+                        if (constrained) form.Size = new Size(1000, 700);
+                        // WinForms can limit the constructor's requested size to the host desktop.
+                        // Fit must preserve that runtime size wherever the supplied working area allows it.
+                        Size initialSize = form.Size;
+                        var expectedSize = new Size(Math.Min(initialSize.Width, area.Width), Math.Min(initialSize.Height, area.Height));
                         form.FitToWorkingArea(area);
                         Expect(area.Contains(form.Bounds), "The initial window extends outside its monitor's usable area.");
-                        Expect(form.Width == Math.Min(1340, area.Width) && form.Height == Math.Min(880, area.Height), "The initial window did not retain the requested size where it fits.");
+                        Expect(form.Size == expectedSize, String.Format("The initial window did not retain its runtime size where it fits. Initial: {0}; working area: {1}; expected: {2}; actual: {3}.", initialSize, area, expectedSize, form.Size));
                         Expect(form.MinimumSize.Width == Math.Min(980, area.Width) && form.MinimumSize.Height == Math.Min(680, area.Height), "The window minimum prevents it from fitting this monitor.");
                         Expect(form.Left == area.Left + (area.Width - form.Width) / 2 && form.Top == area.Top + (area.Height - form.Height) / 2, "The fitted window was not centered on its own monitor.");
                         Expect(form.Controller.Api == null && !form.InterfaceReady, "The window sizing fixture must not initialize the browser or account.");
