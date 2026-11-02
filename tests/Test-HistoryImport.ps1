@@ -1,6 +1,7 @@
 param()
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot
+. (Join-Path $PSScriptRoot 'Invoke-TestProcess.ps1')
 $distribution = Join-Path $workspace 'dist'
 if (!(Test-Path -LiteralPath (Join-Path $distribution 'Microsoft.Web.WebView2.Core.dll'))) { throw 'Run build.ps1 first to create the app distribution.' }
 $output = Join-Path $env:LOCALAPPDATA 'NexusM-BuildCache\history-tests'
@@ -24,8 +25,5 @@ $arguments += Join-Path $PSScriptRoot 'HistoryImportTests.cs'
 if ($LASTEXITCODE -ne 0) { throw 'History test compilation failed.' }
 $report = Join-Path $workspace 'artifacts\history-import-tests.json'
 New-Item -ItemType Directory -Path (Split-Path $report) -Force | Out-Null
-$process = Start-Process -FilePath (Join-Path $output 'HistoryImportTests.exe') -ArgumentList @('"' + $report + '"') -WindowStyle Hidden -PassThru
-if (!$process.WaitForExit(60000)) { throw 'History import fixture checks timed out.' }
-if (!(Test-Path -LiteralPath $report)) { throw 'History import test report was not created.' }
-Get-Content -LiteralPath $report
-if ($process.ExitCode -ne 0) { throw 'History import fixture checks failed.' }
+$result = Invoke-NexusMTestProcess -FilePath (Join-Path $output 'HistoryImportTests.exe') -ArgumentList @($report) -ReportPath $report -TimeoutSeconds 120
+$result | ConvertTo-Json -Depth 100

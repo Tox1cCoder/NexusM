@@ -1,8 +1,10 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -20,6 +22,9 @@ namespace NexusM
         private readonly List<object> results = new List<object>();
         private readonly string root;
         private readonly string report;
+        private readonly Stopwatch elapsed = Stopwatch.StartNew();
+        private string phase = "Starting fixture", currentCheck = "", runtimeVersion = "";
+        private bool infrastructureFailureRecorded;
         private int failures;
 
         [STAThread]
@@ -46,8 +51,29 @@ namespace NexusM
         {
             try
             {
-                CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(root, "profile"));
-                await browser.EnsureCoreWebView2Async(environment);
+                WriteReport(true);
+                await Check("stalled browser operations fail within their deadline and retain diagnostics", async delegate
+                {
+                    bool timedOut = false;
+                    try { await AwaitOperation(new TaskCompletionSource<bool>().Task, "Verifying stalled-operation deadline", 50); }
+                    catch (FixtureInfrastructureException error) { timedOut = error.InnerException is TimeoutException && error.Message.Contains("Verifying stalled-operation deadline"); }
+                    Expect(timedOut, "A stalled browser operation did not produce a named timeout.");
+                    var failed = new TaskCompletionSource<bool>();
+                    failed.SetException(new InvalidOperationException("Synthetic browser failure"));
+                    bool retained = false;
+                    try { await AwaitOperation(failed.Task, "Verifying failed-operation diagnostics"); }
+                    catch (FixtureInfrastructureException error) { retained = error.InnerException != null && error.InnerException.Message == "Synthetic browser failure"; }
+                    Expect(retained, "A browser failure lost its original diagnostic.");
+                });
+                currentCheck = "";
+                SetPhase("Creating WebView2 environment");
+                // Hidden CI windows must run the real page timers without background clamping.
+                // This development-only flag never reaches the shipped application.
+                var options = new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = "--disable-background-timer-throttling" };
+                CoreWebView2Environment environment = await AwaitOperation(CoreWebView2Environment.CreateAsync(null, Path.Combine(root, "profile"), options), phase, 30000);
+                runtimeVersion = environment.BrowserVersionString;
+                SetPhase("Initializing WebView2 control");
+                await AwaitOperation(browser.EnsureCoreWebView2Async(environment), phase, 30000);
                 browser.CoreWebView2.SetVirtualHostNameToFolderMapping("www.nexusmods.com", root, CoreWebView2HostResourceAccessKind.DenyCors);
                 browser.CoreWebView2.SetVirtualHostNameToFolderMapping("untrusted.example", root, CoreWebView2HostResourceAccessKind.DenyCors);
                 // Fail closed if a fixture accidentally initiates a real network request.
@@ -133,7 +159,7 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
                     Dictionary<string, object> state = await Import("");
                     Expect(Get(state, "status") == "complete", "Synthetic history import failed.");
                     await Task.Delay(300);
-                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Raw array name executed an image error handler in the signed-in origin.");
+                    Expect(await Eval("window.__historyPayloadRan===true") == "false", "Raw array name executed an image error handler in the signed-in origin.");
                 });
 
                 await Check("raw object history names stay inert", async delegate
@@ -145,18 +171,18 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
                     Dictionary<string, object> state = await Import("");
                     Expect(Get(state, "status") == "complete", "Synthetic history import failed.");
                     await Task.Delay(300);
-                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Raw object name executed an image error handler in the signed-in origin.");
+                    Expect(await Eval("window.__historyPayloadRan===true") == "false", "Raw object name executed an image error handler in the signed-in origin.");
                 });
 
                 await Check("escaped link text is not reinterpreted as active HTML", async delegate
                 {
                     string row = HtmlRow("/games/baldursgate3/mods/987", "&lt;img src=/missing-history-encoded onerror=window.__historyPayloadRan=true&gt;");
                     await LoadFixture("security-escaped", BaseTable(row) + "<script>window.fetch=async()=>({ok:false,status:401});</script>", false, true);
-                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Payload ran before import.");
+                    Expect(await Eval("window.__historyPayloadRan===true") == "false", "Payload ran before import.");
                     Dictionary<string, object> state = await Import("");
                     Expect(Get(state, "status") == "complete", "Synthetic history import failed.");
                     await Task.Delay(300);
-                    Expect(await browser.ExecuteScriptAsync("window.__historyPayloadRan===true") == "false", "Escaped link text was decoded then executed during import.");
+                    Expect(await Eval("window.__historyPayloadRan===true") == "false", "Escaped link text was decoded then executed during import.");
                     Expect(Get((Dictionary<string, object>)Items(state)[0], "name") == "<img src=/missing-history-encoded onerror=window.__historyPayloadRan=true>", "Literal link text should remain readable without being reparsed as HTML.");
                 });
 
@@ -167,11 +193,11 @@ const html='<a href=/games/baldursgate3/mods/987>Safe name</a><img src=/missing-
 const rows=[[html,'2026-10-18T14:44:00Z','Author','Gameplay','2026-10-19T01:02:00Z','']];
 window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({data:rows})});";
                     await LoadFixture("security-html-cells", "<script>" + script + "</script>", false, true);
-                    Expect(await browser.ExecuteScriptAsync("!!window.__historyPayloadRan") == "false", "Payload ran before import.");
+                    Expect(await Eval("!!window.__historyPayloadRan") == "false", "Payload ran before import.");
                     Dictionary<string, object> state = await Import("");
                     Expect(Get(state, "status") == "complete" && Items(state).Length == 1, "Synthetic HTML history import failed.");
                     await Task.Delay(300);
-                    string activations = await browser.ExecuteScriptAsync("window.__historyPayloadRan||0");
+                    string activations = await Eval("window.__historyPayloadRan||0");
                     Expect(activations == "0", "Endpoint HTML executed image error handlers " + activations + " times during row/image extraction.");
                 });
 
@@ -180,7 +206,7 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
                     await LoadFixture("untrusted", "<script>window.fetch=()=>{document.title='NETWORK WAS USED';throw new Error('Unexpected fetch')};</script>", true, true);
                     Dictionary<string, object> state = await Import("");
                     Expect(Get(state, "status") == "error", "Untrusted host was accepted.");
-                    Expect(await browser.ExecuteScriptAsync("document.title") != "\"NETWORK WAS USED\"", "Untrusted host issued a request.");
+                    Expect(await Eval("document.title") != "\"NETWORK WAS USED\"", "Untrusted host issued a request.");
                 });
 
                 await Check("non-history Nexus page is rejected before any fetch", async delegate
@@ -188,7 +214,7 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
                     await LoadFixture("wrongpage", "<script>window.fetch=()=>{document.title='NETWORK WAS USED';throw new Error('Unexpected fetch')};</script>", false, false);
                     Dictionary<string, object> state = await Import("");
                     Expect(Get(state, "status") == "error", "A non-history page was accepted.");
-                    Expect(await browser.ExecuteScriptAsync("document.title") != "\"NETWORK WAS USED\"", "Non-history page issued a request.");
+                    Expect(await Eval("document.title") != "\"NETWORK WAS USED\"", "Non-history page issued a request.");
                 });
 
                 await Check("game domain validation and safe history URLs", delegate
@@ -203,60 +229,151 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
             }
             catch (Exception error)
             {
-                failures++;
-                results.Add(new { name = "Test harness", passed = false, error = error.ToString() });
+                if (!infrastructureFailureRecorded)
+                {
+                    failures++;
+                    results.Add(new { name = "Test harness", passed = false, error = error.ToString(), stage = phase, elapsedMilliseconds = elapsed.ElapsedMilliseconds });
+                }
             }
+            // Keep asynchronous cleanup outside finally for the app's C# 5 compiler.
+            try
+            {
+                SetPhase("Disposing fixture browser");
+                browser.Dispose();
+                SetPhase("Cleaning fixture profile");
+                string absolute = Path.GetFullPath(root);
+                string prefix = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + "NexusM-HistoryTests-";
+                if (!absolute.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Unsafe history fixture cleanup path.");
+                await AwaitOperation(Task.Run(delegate
+                {
+                    try { if (Directory.Exists(absolute)) Directory.Delete(absolute, true); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }), "Cleaning fixture profile", 5000);
+            }
+            catch (Exception error) { failures++; results.Add(new { name = "Fixture cleanup", passed = false, error = error.ToString(), stage = phase }); }
             finally
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(report));
-                File.WriteAllText(report, json.Serialize(new { passed = failures == 0, failures = failures, checks = results }), new UTF8Encoding(false));
-                browser.Dispose();
+                phase = "Complete";
+                WriteReport(false);
                 Environment.ExitCode = failures == 0 ? 0 : 1;
                 Close();
-                try
-                {
-                    string absolute = Path.GetFullPath(root);
-                    string temporary = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                    if (absolute.StartsWith(temporary, StringComparison.OrdinalIgnoreCase) && Path.GetFileName(absolute).StartsWith("NexusM-HistoryTests-", StringComparison.Ordinal))
-                        Directory.Delete(absolute, true);
-                }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
             }
         }
 
         private async Task Check(string name, Func<Task> test)
         {
-            try { await test(); results.Add(new { name = name, passed = true }); }
-            catch (Exception error) { failures++; results.Add(new { name = name, passed = false, error = error.Message }); }
+            currentCheck = name;
+            phase = "Starting check";
+            WriteReport(true);
+            var clock = Stopwatch.StartNew();
+            try { await test(); results.Add(new { name = name, passed = true, elapsedMilliseconds = clock.ElapsedMilliseconds }); }
+            catch (Exception error)
+            {
+                failures++;
+                results.Add(new { name = name, passed = false, error = error.ToString(), stage = phase, elapsedMilliseconds = clock.ElapsedMilliseconds });
+                // A broken renderer cannot safely run later fixtures; retain the first failure.
+                if (error is FixtureInfrastructureException) { infrastructureFailureRecorded = true; throw; }
+            }
+            finally { WriteReport(true); }
+        }
+
+        private void SetPhase(string value)
+        {
+            if (phase == value) return;
+            phase = value;
+            WriteReport(true);
+        }
+
+        private void WriteReport(bool running)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(report));
+            // The launcher tolerates a partial snapshot while running and validates the
+            // final report after exit. Avoid replacing files held by Windows scanners.
+            using (var stream = new FileStream(report, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                writer.Write(json.Serialize(new { passed = !running && failures == 0, running = running, phase = phase, currentCheck = currentCheck, elapsedMilliseconds = elapsed.ElapsedMilliseconds, runtimeVersion = runtimeVersion, failures = failures, checks = results }));
+        }
+
+        private sealed class FixtureInfrastructureException : Exception
+        {
+            internal FixtureInfrastructureException(string message, Exception cause) : base(message, cause) { }
+        }
+
+        private async Task AwaitOperation(Task task, string operation, int milliseconds = 10000)
+        {
+            SetPhase(operation);
+            using (var cancel = new CancellationTokenSource())
+            {
+                try
+                {
+                    if (await Task.WhenAny(task, Task.Delay(milliseconds, cancel.Token)) != task)
+                        throw new TimeoutException(operation + " timed out after " + milliseconds + " ms.");
+                    await task;
+                }
+                catch (Exception error) { throw new FixtureInfrastructureException(operation + ": " + error.Message, error); }
+                finally { cancel.Cancel(); }
+            }
+        }
+
+        private async Task<T> AwaitOperation<T>(Task<T> task, string operation, int milliseconds = 10000)
+        {
+            await AwaitOperation((Task)task, operation, milliseconds);
+            return await task;
+        }
+
+        private async Task<string> Eval(string script, string operation = "Executing fixture JavaScript", int milliseconds = 10000)
+        {
+            SetPhase(operation);
+            Task<string> task;
+            try { task = browser.ExecuteScriptAsync(script); }
+            catch (Exception error) { throw new FixtureInfrastructureException(operation + ": " + error.Message, error); }
+            return await AwaitOperation(task, operation, milliseconds);
         }
 
         private async Task LoadFixture(string name, string body, bool untrusted, bool history)
         {
             File.WriteAllText(Path.Combine(root, name + ".html"), "<!doctype html><html><head><meta charset='utf-8'><title>History fixture</title></head><body>" + body + "</body></html>", new UTF8Encoding(false));
             TaskCompletionSource<bool> done = new TaskCompletionSource<bool>();
-            EventHandler<CoreWebView2NavigationCompletedEventArgs> handler = null;
-            handler = delegate(object sender, CoreWebView2NavigationCompletedEventArgs e)
+            string target = "https://" + (untrusted ? "untrusted.example" : "www.nexusmods.com") + "/" + name + ".html" + (history ? "?tab=download+history" : "");
+            ulong navigationId = 0;
+            EventHandler<CoreWebView2NavigationStartingEventArgs> starting = delegate(object sender, CoreWebView2NavigationStartingEventArgs e)
             {
-                browser.CoreWebView2.NavigationCompleted -= handler;
+                if (e.Uri == target) navigationId = e.NavigationId;
+            };
+            EventHandler<CoreWebView2NavigationCompletedEventArgs> completed = delegate(object sender, CoreWebView2NavigationCompletedEventArgs e)
+            {
+                if (navigationId == 0 || e.NavigationId != navigationId) return;
                 if (e.IsSuccess) done.TrySetResult(true); else done.TrySetException(new Exception("Fixture navigation failed: " + e.WebErrorStatus));
             };
-            browser.CoreWebView2.NavigationCompleted += handler;
-            browser.CoreWebView2.Navigate("https://" + (untrusted ? "untrusted.example" : "www.nexusmods.com") + "/" + name + ".html" + (history ? "?tab=download+history" : ""));
-            if (await Task.WhenAny(done.Task, Task.Delay(15000)) != done.Task) throw new Exception("Fixture navigation timed out.");
-            await done.Task;
+            browser.CoreWebView2.NavigationStarting += starting;
+            browser.CoreWebView2.NavigationCompleted += completed;
+            try
+            {
+                SetPhase("Navigating to " + name);
+                try { browser.CoreWebView2.Navigate(target); }
+                catch (Exception error) { throw new FixtureInfrastructureException(phase + ": " + error.Message, error); }
+                await AwaitOperation(done.Task, phase, 15000);
+            }
+            finally
+            {
+                browser.CoreWebView2.NavigationStarting -= starting;
+                browser.CoreWebView2.NavigationCompleted -= completed;
+            }
         }
 
         private async Task<Dictionary<string, object>> Import(string game)
         {
-            await browser.ExecuteScriptAsync(BrowserImport.StartHistoryScript(game));
-            for (int i = 0; i < 100; i++)
+            await Eval(BrowserImport.StartHistoryScript(game), "Starting history import");
+            var clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < 10000)
             {
-                Dictionary<string, object> state = json.Deserialize<Dictionary<string, object>>(await browser.ExecuteScriptAsync(BrowserImport.PollHistoryScript));
+                int remaining = Math.Max(1, 10000 - (int)clock.ElapsedMilliseconds);
+                Dictionary<string, object> state = json.Deserialize<Dictionary<string, object>>(await Eval(BrowserImport.PollHistoryScript, "Polling history import", remaining));
                 if (Get(state, "status") != "running") return state;
                 await Task.Delay(100);
             }
-            throw new Exception("Fixture import timed out.");
+            throw new FixtureInfrastructureException("History import did not complete within 10000 ms.", new TimeoutException("History import polling deadline exceeded."));
         }
 
         private static string RowsScript(int count)

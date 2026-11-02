@@ -92,9 +92,21 @@ jobs:
 
       - name: Run offline test suites
         run: |
-          foreach ($suite in @('Backend', 'HistoryImport', 'Controller', 'QueueBrowser', 'QueueRestart', 'FolderCleanup', 'ModBatch', 'BatchDownload', 'Refresh', 'DownloadUpdates', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Startup', 'Version', 'Package', 'Release')) {
-            & powershell -NoProfile -ExecutionPolicy Bypass -File ('.\tests\Test-' + $suite + '.ps1')
-            if ($LASTEXITCODE -ne 0) { throw ($suite + ' tests failed.') }
+          foreach ($suite in @('Backend', 'TestProcess', 'HistoryImport', 'Controller', 'QueueBrowser', 'QueueRestart', 'FolderCleanup', 'ModBatch', 'BatchDownload', 'Refresh', 'DownloadUpdates', 'FilePreview', 'FreeDownloadFlow', 'UI', 'Startup', 'Version', 'Package', 'Release')) {
+            $suiteStarted = [DateTime]::UtcNow
+            $suiteTimer = [Diagnostics.Stopwatch]::StartNew()
+            $suiteResult = 'failed'
+            Write-Output ('::group::{0} tests ({1})' -f $suite, $suiteStarted.ToString('o'))
+            try {
+              & powershell -NoProfile -ExecutionPolicy Bypass -File ('.\tests\Test-' + $suite + '.ps1')
+              if ($LASTEXITCODE -ne 0) { throw ($suite + ' tests failed with exit code ' + $LASTEXITCODE + '.') }
+              $suiteResult = 'passed'
+            }
+            finally {
+              $suiteTimer.Stop()
+              Write-Output ('{0} tests {1} after {2:N1}s ({3}).' -f $suite, $suiteResult, $suiteTimer.Elapsed.TotalSeconds, [DateTime]::UtcNow.ToString('o'))
+              Write-Output '::endgroup::'
+            }
           }
 
       - name: Package portable download
@@ -126,6 +138,7 @@ jobs:
             artifacts/*-tests.json
             artifacts/ui-tests.png
             artifacts/library-layout.png
+            artifacts/app-layout-*.png
           if-no-files-found: ignore
           retention-days: 7
 

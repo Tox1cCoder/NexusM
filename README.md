@@ -141,6 +141,7 @@ After building, these suites use isolated fixtures and need no Nexus account. Th
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Backend.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TestProcess.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-HistoryImport.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Controller.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-QueueBrowser.ps1
@@ -166,6 +167,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
 ```
 
 `Test-ModBatch.ps1 -Live` checks live pagination; `Test-Refresh.ps1 -Live` checks an isolated copy of your library. The account-dependent `--smoke-test` mode additionally checks live mod details, images, and protocol capture. No test initiates a real Nexus archive download. Reports and screenshots go in `artifacts`, which is excluded from source control.
+
+History-import fixtures save their current stage and check timings as they run, bound browser waits, and clean up their isolated test process after a timeout. Their hidden test browser disables background timer throttling; this setting is confined to the fixture. `Test-TestProcess.ps1` verifies the process watchdog and failure reporting. CI logs each suite's start time and duration and uploads the fixture reports even when a suite fails.
 
 The icon source is `ui\assets\app-icon.svg`. After editing it, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Build-Icon.ps1` before rebuilding.
 
