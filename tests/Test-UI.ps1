@@ -1,6 +1,7 @@
 param()
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot
+. (Join-Path $PSScriptRoot 'Invoke-TestProcess.ps1')
 $output = Join-Path $env:LOCALAPPDATA 'NexusM-BuildCache\ui-tests'
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -24,8 +25,5 @@ $arguments += Join-Path $PSScriptRoot 'UiTests.cs'
 if ($LASTEXITCODE -ne 0) { throw 'UI fixture compilation failed.' }
 $report = Join-Path $workspace 'artifacts\ui-tests.json'
 New-Item -ItemType Directory -Path (Split-Path $report) -Force | Out-Null
-$process = Start-Process -FilePath $runner -ArgumentList @('"' + $workspace + '"', '"' + $report + '"') -WindowStyle Hidden -PassThru
-if (!$process.WaitForExit(60000)) { throw 'UI fixture checks timed out.' }
-if (!(Test-Path -LiteralPath $report)) { throw 'UI fixture report was not created.' }
-Get-Content -LiteralPath $report
-if ($process.ExitCode -ne 0) { throw 'UI fixture checks failed.' }
+$result = Invoke-NexusMTestProcess -FilePath $runner -ArgumentList @($workspace, $report) -ReportPath $report -TimeoutSeconds 120
+$result | ConvertTo-Json -Depth 100

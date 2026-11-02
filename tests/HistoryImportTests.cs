@@ -23,6 +23,9 @@ namespace NexusM
         private readonly string root;
         private readonly string report;
         private readonly Stopwatch elapsed = Stopwatch.StartNew();
+        private readonly TaskCompletionSource<bool> browserExited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private CoreWebView2Environment environment;
+        private bool browserInitialized;
         private string phase = "Starting fixture", currentCheck = "", runtimeVersion = "";
         private bool infrastructureFailureRecorded;
         private int failures;
@@ -70,10 +73,12 @@ namespace NexusM
                 // Hidden CI windows must run the real page timers without background clamping.
                 // This development-only flag never reaches the shipped application.
                 var options = new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = "--disable-background-timer-throttling" };
-                CoreWebView2Environment environment = await AwaitOperation(CoreWebView2Environment.CreateAsync(null, Path.Combine(root, "profile"), options), phase, 30000);
+                environment = await AwaitOperation(CoreWebView2Environment.CreateAsync(null, Path.Combine(root, "profile"), options), phase, 30000);
+                environment.BrowserProcessExited += delegate { browserExited.TrySetResult(true); };
                 runtimeVersion = environment.BrowserVersionString;
                 SetPhase("Initializing WebView2 control");
                 await AwaitOperation(browser.EnsureCoreWebView2Async(environment), phase, 30000);
+                browserInitialized = true;
                 browser.CoreWebView2.SetVirtualHostNameToFolderMapping("www.nexusmods.com", root, CoreWebView2HostResourceAccessKind.DenyCors);
                 browser.CoreWebView2.SetVirtualHostNameToFolderMapping("untrusted.example", root, CoreWebView2HostResourceAccessKind.DenyCors);
                 // Fail closed if a fixture accidentally initiates a real network request.
@@ -240,16 +245,22 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
             {
                 SetPhase("Disposing fixture browser");
                 browser.Dispose();
-                SetPhase("Cleaning fixture profile");
-                string absolute = Path.GetFullPath(root);
-                string prefix = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + "NexusM-HistoryTests-";
-                if (!absolute.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Unsafe history fixture cleanup path.");
-                await AwaitOperation(Task.Run(delegate
+                // Disposing a control does not release its profile immediately. Wait for
+                // the runtime's exit event before touching files it may still be writing.
+                if (browserInitialized || browserExited.Task.IsCompleted)
                 {
-                    try { if (Directory.Exists(absolute)) Directory.Delete(absolute, true); }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
-                }), "Cleaning fixture profile", 5000);
+                    await AwaitOperation(browserExited.Task, "Waiting for fixture browser shutdown", 10000);
+                    SetPhase("Cleaning fixture profile");
+                    string absolute = Path.GetFullPath(root);
+                    string prefix = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + "NexusM-HistoryTests-";
+                    if (!absolute.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Unsafe history fixture cleanup path.");
+                    await AwaitOperation(Task.Run(delegate
+                    {
+                        try { if (Directory.Exists(absolute)) Directory.Delete(absolute, true); }
+                        catch (IOException) { }
+                        catch (UnauthorizedAccessException) { }
+                    }), "Cleaning fixture profile", 5000);
+                }
             }
             catch (Exception error) { failures++; results.Add(new { name = "Fixture cleanup", passed = false, error = error.ToString(), stage = phase }); }
             finally
@@ -334,7 +345,7 @@ window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async
         private async Task LoadFixture(string name, string body, bool untrusted, bool history)
         {
             File.WriteAllText(Path.Combine(root, name + ".html"), "<!doctype html><html><head><meta charset='utf-8'><title>History fixture</title></head><body>" + body + "</body></html>", new UTF8Encoding(false));
-            TaskCompletionSource<bool> done = new TaskCompletionSource<bool>();
+            TaskCompletionSource<bool> done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             string target = "https://" + (untrusted ? "untrusted.example" : "www.nexusmods.com") + "/" + name + ".html" + (history ? "?tab=download+history" : "");
             ulong navigationId = 0;
             EventHandler<CoreWebView2NavigationStartingEventArgs> starting = delegate(object sender, CoreWebView2NavigationStartingEventArgs e)

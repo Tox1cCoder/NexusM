@@ -1,5 +1,6 @@
 param()
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Invoke-TestProcess.ps1')
 $workspace = Split-Path $PSScriptRoot
 $distribution = Join-Path $workspace 'dist'
 if (!(Test-Path -LiteralPath (Join-Path $distribution 'Microsoft.Web.WebView2.Core.dll'))) { throw 'Run build.ps1 first to create the app distribution.' }
@@ -29,17 +30,5 @@ $arguments += Join-Path $PSScriptRoot 'FreeDownloadFlowTests.cs'
 if ($LASTEXITCODE -ne 0) { throw 'Free-download test compilation failed.' }
 $report = Join-Path $workspace 'artifacts\free-download-tests.json'
 New-Item -ItemType Directory -Path (Split-Path $report) -Force | Out-Null
-$process = $null
-try {
-    $process = Start-Process -FilePath (Join-Path $output 'FreeDownloadFlowTests.exe') -ArgumentList @('"' + $report + '"') -WindowStyle Hidden -PassThru
-    if (!$process.WaitForExit(45000)) { throw 'Free-download fixture checks timed out.' }
-    if (!(Test-Path -LiteralPath $report)) { throw 'Free-download test report was not created.' }
-    Get-Content -LiteralPath $report
-    if ($process.ExitCode -ne 0) { throw 'Free-download fixture checks failed.' }
-}
-finally {
-    if ($null -ne $process) {
-        if (!$process.HasExited) { $process.Kill(); $process.WaitForExit(5000) | Out-Null }
-        $process.Dispose()
-    }
-}
+$result = Invoke-NexusMTestProcess -FilePath (Join-Path $output 'FreeDownloadFlowTests.exe') -ArgumentList @($report) -ReportPath $report -TimeoutSeconds 120
+$result | ConvertTo-Json -Depth 100

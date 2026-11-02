@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -20,7 +21,15 @@ namespace NexusM
         private readonly List<object> results = new List<object>();
         private readonly string root;
         private readonly string report;
-        private string fixture = "", navigation;
+        private readonly Stopwatch elapsed = Stopwatch.StartNew();
+        private readonly TaskCompletionSource<string> browserFailure = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> browserExited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private CoreWebView2Environment environment;
+        private bool browserInitialized;
+        private readonly List<string> captureEvents = new List<string>();
+        private TaskCompletionSource<bool> handoff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        private string fixture = "", navigation, phase = "Starting fixture", currentCheck = "", runtimeVersion = "", lifecycle = "";
+        private bool finishing, failureRecorded;
         private int failures, captured;
         private static readonly string selected = "https://www.nexusmods.com/baldursgate3/mods/42?tab=files&file_id=123&nmm=1";
 
@@ -39,6 +48,8 @@ namespace NexusM
             Directory.CreateDirectory(root);
             Width = 800; Height = 600; ShowInTaskbar = false; Opacity = 0;
             browser.Dock = DockStyle.Fill; Controls.Add(browser);
+            FormClosing += delegate(object sender, FormClosingEventArgs e) { if (!finishing) RecordBrowserFailure("Fixture form closing: " + e.CloseReason); };
+            browser.Disposed += delegate { if (!finishing) RecordBrowserFailure("Fixture browser disposed unexpectedly"); };
             Shown += async delegate { await Run(); };
         }
 
@@ -46,8 +57,25 @@ namespace NexusM
         {
             try
             {
-                CoreWebView2Environment environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(root, "profile"));
-                await browser.EnsureCoreWebView2Async(environment);
+                WriteReport(true);
+                SetPhase("Creating WebView2 environment");
+                // Hidden fixture timers must run normally; this option is never shipped.
+                var options = new CoreWebView2EnvironmentOptions { AdditionalBrowserArguments = "--disable-background-timer-throttling" };
+                environment = await AwaitOperation(CoreWebView2Environment.CreateAsync(null, Path.Combine(root, "profile"), options), phase, 30000);
+                runtimeVersion = environment.BrowserVersionString;
+                environment.BrowserProcessExited += delegate(object sender, CoreWebView2BrowserProcessExitedEventArgs e)
+                {
+                    browserExited.TrySetResult(true);
+                    RecordBrowserFailure("WebView2 browser exited: " + e.BrowserProcessExitKind + " (PID " + e.BrowserProcessId + ")");
+                };
+                SetPhase("Initializing WebView2 control");
+                await AwaitOperation(browser.EnsureCoreWebView2Async(environment), phase, 30000);
+                browserInitialized = true;
+                browser.CoreWebView2.ProcessFailed += delegate(object sender, CoreWebView2ProcessFailedEventArgs e)
+                {
+                    if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited || e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited || e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive)
+                        RecordBrowserFailure("WebView2 process failed: " + e.ProcessFailedKind + "; " + e.Reason + " (exit " + e.ExitCode + "): " + e.ProcessDescription);
+                };
                 browser.CoreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
                 browser.CoreWebView2.WebResourceRequested += delegate(object sender, CoreWebView2WebResourceRequestedEventArgs e)
                 {
@@ -57,26 +85,27 @@ namespace NexusM
                 };
                 browser.CoreWebView2.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs e)
                 {
-                    if (e.Uri.StartsWith("nxm://", StringComparison.OrdinalIgnoreCase)) { e.Cancel = true; captured++; }
-                    else if (navigation != null && e.Uri != navigation) { navigation = e.Uri; e.Cancel = true; }
+                    if (e.Uri.StartsWith("nxm://", StringComparison.OrdinalIgnoreCase)) { e.Cancel = true; RecordCapture("NavigationStarting"); }
+                    else if (navigation != null && e.Uri != navigation) e.Cancel = true;
                 };
                 browser.CoreWebView2.LaunchingExternalUriScheme += delegate(object sender, CoreWebView2LaunchingExternalUriSchemeEventArgs e)
                 {
                     e.Cancel = true;
-                    if (e.Uri.StartsWith("nxm://", StringComparison.OrdinalIgnoreCase)) captured++;
+                    if (e.Uri.StartsWith("nxm://", StringComparison.OrdinalIgnoreCase)) RecordCapture("LaunchingExternalUriScheme");
                 };
 
                 await Check("ordinary slow click runs once and preserves the website countdown", async delegate
                 {
-                    await LoadFixture(selected, "<p id='phase'>Ready</p><button id='slowDownloadButton' data-download-url='#ERROR-download-location-not-found'>Slow download</button><script>window.clicks=0;document.querySelector('button').onclick=()=>{window.clicks++;document.querySelector('#phase').textContent='Countdown';setTimeout(()=>{document.querySelector('#phase').textContent='Done';location.href='nxm://baldursgate3/mods/42/files/123?key=fixture&expires=2000000000&user_id=1';},1400);};</script>");
+                    await LoadFixture(selected, "<p id='phase'>Ready</p><button id='slowDownloadButton' data-download-url='#ERROR-download-location-not-found'>Slow download</button><script>window.clicks=0;document.querySelector('button').onclick=()=>{window.clicks++;document.querySelector('#phase').textContent='Countdown';window.countdownStarted=performance.now();setTimeout(()=>{window.countdownFinished=performance.now();document.querySelector('#phase').textContent='Done';location.href='nxm://baldursgate3/mods/42/files/123?key=fixture&expires=2000000000&user_id=1';},1400);};</script>");
                     Dictionary<string, object> state = await AdvanceReady();
                     Expect(Get(state, "status") == "waiting", "A normal download did not wait for Nexus.");
                     Expect(await Eval("window.clicks") == "1", "The slow-download button was not clicked.");
                     Expect(await Eval("document.querySelector('#phase').textContent") == "\"Countdown\"" && captured == 0, "The website countdown was skipped.");
                     await Advance(); await Advance();
                     Expect(await Eval("window.clicks") == "1", "Repeated polling clicked the slow button again.");
-                    await Task.Delay(1700);
-                    Expect(captured == 1, "The normal website nxm handoff was not captured once.");
+                    await WaitForHandoff();
+                    // Allow clock precision and timer rounding, while still requiring the countdown.
+                    Expect(await Eval("window.countdownFinished-window.countdownStarted >= 1390 && window.clicks===1 && document.querySelector('#phase').textContent==='Done'") == "true", "The website countdown did not finish naturally before its single handoff.");
                 });
                 await Check("disabled slow button waits until Nexus enables it", async delegate
                 {
@@ -88,12 +117,12 @@ namespace NexusM
                 });
                 await Check("current Nexus web component uses its open shadow button and ordinary countdown", async delegate
                 {
-                    await LoadFixture(selected, "<button onclick='window.bad=true'>Slow download</button><mod-file-download style='display:block' file-id='123' game-domain='/baldursgate3' is-nmm-download='true' user-is-logged-in='true'></mod-file-download><script>window.clicks=0;const root=document.querySelector('mod-file-download').attachShadow({mode:'open'});root.innerHTML='<div><button>Fast download</button><span id=\"nested\"></span></div>';root.querySelector('button').onclick=()=>window.bad=true;const nested=root.querySelector('#nested').attachShadow({mode:'open'});nested.innerHTML='<button>Slow download</button>';nested.querySelector('button').onclick=()=>{window.clicks++;setTimeout(()=>location.href='nxm://baldursgate3/mods/42/files/123?key=fixture&expires=2000000000&user_id=1',1200);};</script>");
+                    await LoadFixture(selected, "<button onclick='window.bad=true'>Slow download</button><mod-file-download style='display:block' file-id='123' game-domain='/baldursgate3' is-nmm-download='true' user-is-logged-in='true'></mod-file-download><script>window.clicks=0;const root=document.querySelector('mod-file-download').attachShadow({mode:'open'});root.innerHTML='<div><button>Fast download</button><span id=\"nested\"></span></div>';root.querySelector('button').onclick=()=>window.bad=true;const nested=root.querySelector('#nested').attachShadow({mode:'open'});nested.innerHTML='<button>Slow download</button>';nested.querySelector('button').onclick=()=>{window.clicks++;window.countdownStarted=performance.now();setTimeout(()=>{window.countdownFinished=performance.now();location.href='nxm://baldursgate3/mods/42/files/123?key=fixture&expires=2000000000&user_id=1';},1200);};</script>");
                     await AdvanceReady(); await Advance();
                     Expect(await Eval("window.clicks") == "1" && await Eval("window.bad===true") == "false", "The selected component's exact slow button was not clicked once.");
                     Expect(captured == 0, "The component countdown was skipped.");
-                    await Task.Delay(1500);
-                    Expect(captured == 1, "The component's native handoff was not captured.");
+                    await WaitForHandoff();
+                    Expect(await Eval("window.countdownFinished-window.countdownStarted >= 1190 && window.clicks===1 && window.bad!==true") == "true", "The component countdown did not finish naturally before its single handoff.");
                 });
                 await Check("web components for another file, game, or manual mode are never automated", async delegate
                 {
@@ -178,27 +207,126 @@ namespace NexusM
                     return Task.FromResult(0);
                 });
             }
-            catch (Exception error) { failures++; results.Add(new { name = "Test harness", passed = false, error = error.ToString() }); }
+            catch (Exception error)
+            {
+                if (!failureRecorded) { failures++; results.Add(new { name = "Test harness", passed = false, error = error.ToString(), stage = phase }); }
+            }
+            // C# 5 does not permit awaited cleanup in finally.
+            try
+            {
+                finishing = true;
+                SetPhase("Disposing fixture browser");
+                browser.Dispose();
+                // The profile remains owned by WebView2 until its browser exit event.
+                if (browserInitialized || browserExited.Task.IsCompleted)
+                {
+                    await AwaitOperation(browserExited.Task, "Waiting for fixture browser shutdown", 10000);
+                    SetPhase("Cleaning fixture profile");
+                    string absolute = Path.GetFullPath(root);
+                    string prefix = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + "NexusM-FreeDownloadTests-";
+                    if (!absolute.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Unsafe free-download fixture cleanup path.");
+                    await AwaitOperation(Task.Run(delegate
+                    {
+                        try { if (Directory.Exists(absolute)) Directory.Delete(absolute, true); }
+                        catch (IOException) { }
+                        catch (UnauthorizedAccessException) { }
+                    }), "Cleaning fixture profile", 5000);
+                }
+            }
+            catch (Exception error) { failures++; results.Add(new { name = "Fixture cleanup", passed = false, error = error.ToString(), stage = phase }); }
             finally
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(report));
-                File.WriteAllText(report, json.Serialize(new { passed = failures == 0, failures = failures, checks = results }), new UTF8Encoding(false));
-                browser.Dispose(); Environment.ExitCode = failures == 0 ? 0 : 1; Close();
-                try
-                {
-                    string absolute = Path.GetFullPath(root);
-                    string temporary = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                    if (absolute.StartsWith(temporary, StringComparison.OrdinalIgnoreCase) && Path.GetFileName(absolute).StartsWith("NexusM-FreeDownloadTests-", StringComparison.Ordinal)) Directory.Delete(absolute, true);
-                }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
+                phase = "Complete";
+                WriteReport(false);
+                Environment.ExitCode = failures == 0 ? 0 : 1;
+                Close();
             }
         }
 
         private async Task Check(string name, Func<Task> test)
         {
-            try { await test(); results.Add(new { name = name, passed = true }); }
-            catch (Exception error) { failures++; results.Add(new { name = name, passed = false, error = error.Message }); }
+            currentCheck = name;
+            phase = "Starting check";
+            WriteReport(true);
+            var clock = Stopwatch.StartNew();
+            try { await test(); results.Add(new { name = name, passed = true, elapsedMilliseconds = clock.ElapsedMilliseconds }); }
+            catch (Exception error)
+            {
+                failures++; failureRecorded = true;
+                results.Add(new { name = name, passed = false, error = error.ToString(), stage = phase, captures = captured, captureEvents = captureEvents.ToArray(), elapsedMilliseconds = clock.ElapsedMilliseconds });
+                // Preserve the first failure; a delayed handoff must not reach a later fixture.
+                throw;
+            }
+            finally { WriteReport(true); }
+        }
+
+        private void RecordBrowserFailure(string reason)
+        {
+            if (finishing) return;
+            lifecycle = reason;
+            browserFailure.TrySetResult(reason);
+            WriteReport(true);
+        }
+
+        private void RecordCapture(string source)
+        {
+            captured++;
+            captureEvents.Add(source);
+            handoff.TrySetResult(true);
+        }
+
+        private async Task WaitForHandoff()
+        {
+            await AwaitOperation(handoff.Task, "Waiting for website countdown and nxm handoff", 10000);
+            // Evaluate the original page after cancellation to drain the handoff event turn.
+            await Eval("window.clicks", "Verifying captured handoff");
+            Expect(captured == 1, "Expected one website nxm handoff; captured=" + captured + " via " + String.Join(", ", captureEvents) + ".");
+        }
+
+        private void SetPhase(string value)
+        {
+            if (phase == value) return;
+            phase = value;
+            WriteReport(true);
+        }
+
+        private void WriteReport(bool running)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(report));
+            // The launcher tolerates partial progress JSON and validates the final report
+            // after exit. Shared writes avoid Windows replacement/scanner races.
+            using (var stream = new FileStream(report, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                writer.Write(json.Serialize(new { passed = !running && failures == 0, running = running, phase = phase, currentCheck = currentCheck, runtimeVersion = runtimeVersion, browserFailure = lifecycle, elapsedMilliseconds = elapsed.ElapsedMilliseconds, failures = failures, checks = results }));
+        }
+
+        private sealed class FixtureInfrastructureException : Exception
+        {
+            internal FixtureInfrastructureException(string message, Exception cause) : base(message, cause) { }
+        }
+
+        private async Task AwaitOperation(Task task, string operation, int milliseconds = 10000)
+        {
+            SetPhase(operation);
+            using (var cancel = new CancellationTokenSource())
+            {
+                try
+                {
+                    Task delay = Task.Delay(milliseconds, cancel.Token);
+                    Task completed = finishing ? await Task.WhenAny(task, delay) : await Task.WhenAny(task, delay, browserFailure.Task);
+                    if (completed == browserFailure.Task) throw new InvalidOperationException(browserFailure.Task.Result);
+                    if (completed != task) throw new TimeoutException(operation + " timed out after " + milliseconds + " ms.");
+                    await task;
+                }
+                catch (Exception error) { throw new FixtureInfrastructureException(operation + ": " + error.Message, error); }
+                finally { cancel.Cancel(); }
+            }
+        }
+
+        private async Task<T> AwaitOperation<T>(Task<T> task, string operation, int milliseconds = 10000)
+        {
+            await AwaitOperation((Task)task, operation, milliseconds);
+            return await task;
         }
 
         private async Task LoadFixture(string url, string body)
@@ -206,22 +334,49 @@ namespace NexusM
             fixture = "<!doctype html><html><head><meta charset='utf-8'><title>Download fixture</title></head><body>" + body + "</body></html>";
             navigation = url + (url.Contains("?") ? "&" : "?") + "fixture=" + Guid.NewGuid().ToString("N");
             captured = 0;
-            TaskCompletionSource<bool> done = new TaskCompletionSource<bool>();
-            EventHandler<CoreWebView2NavigationCompletedEventArgs> handler = null;
-            handler = delegate(object sender, CoreWebView2NavigationCompletedEventArgs e)
+            captureEvents.Clear();
+            handoff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool> done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            ulong navigationId = 0;
+            EventHandler<CoreWebView2NavigationStartingEventArgs> starting = delegate(object sender, CoreWebView2NavigationStartingEventArgs e)
             {
-                browser.CoreWebView2.NavigationCompleted -= handler;
+                if (e.Uri == navigation) navigationId = e.NavigationId;
+            };
+            EventHandler<CoreWebView2NavigationCompletedEventArgs> completed = delegate(object sender, CoreWebView2NavigationCompletedEventArgs e)
+            {
+                if (navigationId == 0 || e.NavigationId != navigationId) return;
                 if (e.IsSuccess) done.TrySetResult(true); else done.TrySetException(new Exception("Fixture navigation failed: " + e.WebErrorStatus));
             };
-            browser.CoreWebView2.NavigationCompleted += handler;
-            browser.CoreWebView2.Navigate(navigation);
-            if (await Task.WhenAny(done.Task, Task.Delay(10000)) != done.Task) throw new Exception("Fixture navigation timed out.");
-            await done.Task;
+            try
+            {
+                SetPhase("Navigating to local download fixture");
+                browser.CoreWebView2.NavigationStarting += starting;
+                browser.CoreWebView2.NavigationCompleted += completed;
+                browser.CoreWebView2.Navigate(navigation);
+                await AwaitOperation(done.Task, phase, 10000);
+            }
+            catch (FixtureInfrastructureException) { throw; }
+            catch (Exception error) { throw new FixtureInfrastructureException(phase + ": " + error.Message, error); }
+            finally
+            {
+                if (browser.CoreWebView2 != null)
+                {
+                    browser.CoreWebView2.NavigationStarting -= starting;
+                    browser.CoreWebView2.NavigationCompleted -= completed;
+                }
+            }
         }
 
         private async Task<Dictionary<string, object>> AdvanceReady() { await Advance(); await Task.Delay(600); return await Advance(); }
         private async Task<Dictionary<string, object>> Advance() { return json.Deserialize<Dictionary<string, object>>(await Eval(FreeDownloadFlow.Script("baldursgate3", 42, 123))); }
-        private Task<string> Eval(string script) { return browser.ExecuteScriptAsync(script); }
+        private async Task<string> Eval(string script, string operation = "Executing download fixture JavaScript")
+        {
+            SetPhase(operation);
+            Task<string> task;
+            try { task = browser.ExecuteScriptAsync(script); }
+            catch (Exception error) { throw new FixtureInfrastructureException(operation + ": " + error.Message, error); }
+            return await AwaitOperation(task, operation);
+        }
         private static string Get(Dictionary<string, object> state, string key) { object value; return state.TryGetValue(key, out value) && value != null ? value.ToString() : ""; }
         private static void Expect(bool condition, string message) { if (!condition) throw new Exception(message); }
     }
