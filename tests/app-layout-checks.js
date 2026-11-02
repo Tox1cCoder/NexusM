@@ -149,6 +149,18 @@
         if($$('.download-card').length!==4||!$('[data-retry-download]')||!$('[data-download-folder]'))fail('Every fixture entry and its ordinary actions must remain available.');
         window.scrollTo(0,0);
       },'downloads');
+      await check('Live sidebar download summary fits and remains reachable',()=>{
+        const summary=$('#sidebar-download-summary'),sidebar=$('.sidebar');
+        fit(summary,'Sidebar download summary');reach(summary,'Sidebar download summary',sidebar);
+        for(const element of $$('#sidebar-download-summary strong,#sidebar-download-summary progress'))fit(element,'Sidebar download count or progress');
+        const rect=summary.getBoundingClientRect(),bounds=sidebar.getBoundingClientRect();
+        if(rect.left<bounds.left||rect.right>bounds.right||rect.height<44)fail('The download summary must stay inside the sidebar with a usable target.');
+        if(!summary.contains(document.elementFromPoint((rect.left+rect.right)/2,(rect.top+rect.bottom)/2)))fail('The live sidebar summary is covered by another element.');
+        if(!summary.getAttribute('aria-label')?.includes('1 downloading')||!summary.getAttribute('aria-label').includes('1 of 4 files done')||summary.title!==summary.getAttribute('aria-label'))fail('The sidebar summary must retain its full description when the sidebar is collapsed.');
+        if(innerWidth<=850&&visible($('#sidebar-download-total')))fail('The compact sidebar should keep the completion count readable without the total denominator.');
+        summary.focus({preventScroll:true});if(document.activeElement!==summary)fail('The sidebar summary must retain keyboard access.');
+        sidebar.scrollTop=0;window.scrollTo(0,0);
+      },'sidebar-downloads');
       await check('Import dialog fits and its footer remains reachable',async()=>{
         window.NexusM.navigate('library');$('#import-history-button').click();await settle();
         const dialog=$('#input-dialog');

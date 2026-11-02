@@ -48,7 +48,7 @@ Every accepted file is saved in the queue before authorization or transfer start
 
 Temporary connection errors, timeouts, server failures, and rate limits receive bounded retries. Failed or timed-out jobs stay in **Downloads** with a **Retry** button while other jobs continue. Cancelling a job keeps its partial file and prevents automatic recovery of that job. **Download log** on each entry shows recent state changes, attempts, recovery, and error codes. API keys and signed download links are excluded from these diagnostics.
 
-The Downloads badge counts completed archives in the current list; the page summary shows downloaded, active, and total entries.
+The Downloads badge counts completed archives in the current list; the page summary shows downloaded, active, and total entries. A live card beneath Downloads in the sidebar shows how many files are downloading, how many are done out of the total, and a completion bar. Queued files, preparation, retries, and items needing attention appear beneath the counts. Select the card to open Downloads. It condenses to icons and counts in a narrow window and clears when the download list is empty.
 
 See [Download queue behavior and recovery](docs/download-queue.md) for configuration defaults, restart behavior, failure handling, and verification details.
 

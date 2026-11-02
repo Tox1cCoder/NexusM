@@ -270,8 +270,37 @@
     const summary=`${completed} downloaded, ${active} active, ${total} ${total===1?'entry':'entries'}`;
     downloads.textContent=completed;downloads.title=summary;
     if($('#downloads-summary').textContent!==summary)$('#downloads-summary').textContent=summary;
+    renderSidebarDownloads(completed,total);
     const name=state.user?.name || state.user?.username;
     setHtml('#account',`<span class="avatar">${esc(name?shortName(name):'N')}</span><div><strong>${esc(name || 'Not connected')}</strong><small>${name?(state.user.isPremium?'Premium account':'Free account'):'Connect your Nexus account'}</small></div><button class="icon-button" data-page="settings" aria-label="Account settings">${icon('settings')}</button>`);
+  }
+  function renderSidebarDownloads(completed,total){
+    let downloading=0,queued=0,preparing=0,retrying=0,attention=0,cancelled=0;
+    for(const download of state.downloads){
+      const status=download.status||'queued';
+      if(status==='downloading')downloading++;
+      else if(status==='queued')queued++;
+      else if(status==='retrying')retrying++;
+      else if(['failed','interrupted'].includes(status))attention++;
+      else if(['cancelled','canceled'].includes(status))cancelled++;
+      else if(queuedStatuses.has(status)){if(download.needsUser)attention++;else preparing++;}
+    }
+    const pending=[queued?`${queued} queued`:'',preparing?`${preparing} preparing`:'',retrying?`${retrying} retrying`:''].filter(Boolean);
+    const details=[...pending,attention?`${attention} ${attention===1?'needs':'need'} attention`:'',cancelled?`${cancelled} cancelled`:''].filter(Boolean);
+    const summary=total?`Downloads: ${downloading} downloading, ${completed} of ${total} ${total===1?'file':'files'} done${details.length?`, ${details.join(', ')}`:''}.`:'Downloads: No downloads in queue.';
+    const button=$('#sidebar-download-summary');
+    button.classList.toggle('hidden',total===0);
+    button.classList.toggle('has-active-downloads',downloading>0);
+    if(button.getAttribute('aria-label')!==summary){button.setAttribute('aria-label',summary);button.title=summary;}
+    const text=(selector,value)=>{const element=$(selector);if(element.textContent!==value)element.textContent=value;};
+    text('#sidebar-downloading-count',String(downloading));text('#sidebar-done-count',String(completed));text('#sidebar-download-total',`/ ${total}`);
+    text('#sidebar-download-pending',pending.join(' · '));$('#sidebar-download-pending').classList.toggle('hidden',!pending.length);
+    text('#sidebar-download-attention-count',String(attention));$('#sidebar-download-attention').classList.toggle('hidden',attention===0);
+    text('#sidebar-download-attention .sidebar-download-label',attention===1?'needs attention':'need attention');
+    text('#sidebar-download-cancelled',cancelled?`${cancelled} cancelled`:'');$('#sidebar-download-cancelled').classList.toggle('hidden',cancelled===0);
+    text('#sidebar-download-status',summary);
+    const progress=$('#sidebar-download-progress');if(progress.max!==(total||1))progress.max=total||1;if(progress.value!==completed)progress.value=completed;
+    const navigation=$('.nav-item[data-page="downloads"]');if(navigation.title!==(total?summary:'Downloads'))navigation.title=total?summary:'Downloads';
   }
   function renderGames(){
     const total=libraryMods().length;

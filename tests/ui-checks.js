@@ -798,6 +798,47 @@
           expect($$('#downloads-list .download-card').length===15,'Pending, failed, cancelled, interrupted, and unknown entries must stay visible.');
         }finally{window.NexusM.setState(fixture);}
       });
+      await check('sidebar download summary separates transfers, completed files, and waiting work',()=>{
+        const statuses=['completed','completed','downloading','downloading','queued','queued',undefined,'authorizing','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization','retrying','retrying','failed','interrupted','cancelled','canceled'];
+        const downloads=[...statuses.map((status,index)=>({id:`sidebar-mixed-${index}`,name:`Sidebar fixture ${index}`,status})),{id:'sidebar-needs-nexus',status:'waiting-authorization',needsUser:true}];
+        try{
+          window.NexusM.setState({downloads});window.NexusM.navigate('library');
+          const summary=$('#sidebar-download-summary'),progress=$('#sidebar-download-progress');
+          expect(summary&&summary.getClientRects().length,'A nonempty queue must remain visible beneath sidebar Downloads.');
+          expect($('#sidebar-downloading-count').textContent==='2'&&$('#sidebar-done-count').textContent==='2'&&$('#sidebar-download-total').textContent==='/ 19','Only actual transfers count as downloading; completed files and the entire queue need separate counts.');
+          expect(progress.tagName==='PROGRESS'&&progress.value===2&&progress.max===19,'Overall progress must measure completed files, including pending and unsuccessful entries in its total.');
+          expect($('#sidebar-download-pending').textContent==='3 queued · 5 preparing · 2 retrying','Queued, preparing, and retrying downloads must remain distinct from current transfers.');
+          expect(!$('#sidebar-download-attention').classList.contains('hidden')&&$('#sidebar-download-attention-count').textContent==='3','Failed, interrupted, and Nexus sign-in entries must be shown as needing attention.');
+          expect($('#sidebar-download-cancelled').textContent==='2 cancelled','Cancelled downloads must not be mistaken for completed files or attention requests.');
+          const label=summary.getAttribute('aria-label');
+          expect(label?.startsWith('Downloads:')&&label.includes('2 downloading')&&label.includes('2 of 19 files done')&&label.includes('3 queued')&&label.includes('3 need attention')&&summary.title===label,'The compact and full sidebar need the same complete accessible queue summary.');
+          summary.click();expect($('#page-downloads').classList.contains('active'),'The live summary must open Downloads.');
+        }finally{window.NexusM.setState(fixture);window.NexusM.navigate('downloads');}
+      });
+      await check('sidebar summary follows live transfers and resets after the queue is cleared',()=>{
+        try{
+          window.NexusM.setState({downloads:[]});
+          const summary=$('#sidebar-download-summary'),progress=$('#sidebar-download-progress');
+          expect(summary.classList.contains('hidden'),'An empty queue should leave sidebar navigation uncluttered.');
+          window.NexusM.receive({event:'download',data:{id:'sidebar-live',status:'queued',name:'Live sidebar archive'}});
+          expect(!summary.classList.contains('hidden')&&$('#sidebar-downloading-count').textContent==='0'&&$('#sidebar-download-pending').textContent==='1 queued','A queued download must appear immediately without pretending that it is transferring.');
+          window.NexusM.receive({event:'download',data:{id:'sidebar-live',status:'waiting-authorization',needsUser:false}});
+          expect($('#sidebar-download-pending').textContent==='1 preparing','The Nexus countdown must show as preparation.');
+          window.NexusM.receive({event:'download',data:{id:'sidebar-live',needsUser:true}});
+          expect($('#sidebar-download-attention-count').textContent==='1'&&$('#sidebar-download-pending').classList.contains('hidden'),'A sign-in request must move from preparation to attention.');
+          window.NexusM.receive({event:'downloadProgress',data:{id:'sidebar-live',status:'downloading',needsUser:false,bytes:1024,total:4096}});
+          expect($('#sidebar-downloading-count').textContent==='1'&&progress.value===0&&$('#sidebar-download-attention').classList.contains('hidden'),'Starting the transfer must update activity without treating partial bytes as a completed file.');
+          summary.focus();
+          window.NexusM.receive({event:'downloadProgress',data:{id:'sidebar-live',bytes:3072,total:4096}});
+          expect($('#sidebar-download-summary')===summary&&$('#sidebar-download-progress')===progress&&document.activeElement===summary,'Byte updates must preserve the sidebar controls and keyboard focus.');
+          window.NexusM.receive({event:'download',data:{id:'sidebar-live',status:'completed'}});
+          expect($('#sidebar-downloading-count').textContent==='0'&&$('#sidebar-done-count').textContent==='1'&&progress.value===1&&progress.max===1,'Finishing a file must immediately advance completed progress.');
+          window.NexusM.receive({event:'download',data:{id:'sidebar-live',status:'failed'}});
+          expect($('#sidebar-done-count').textContent==='0'&&progress.value===0&&$('#sidebar-download-attention-count').textContent==='1','A corrected failure must remove the completion and request attention.');
+          window.NexusM.setState({downloads:[]});
+          expect(summary.classList.contains('hidden')&&$('#sidebar-downloading-count').textContent==='0'&&$('#sidebar-done-count').textContent==='0','Clearing the list must hide and reset the live sidebar summary.');
+        }finally{window.NexusM.setState(fixture);}
+      });
       await check('empty download snapshots remove cards added by individual events',()=>{
         try{
           for(const event of ['download','downloadProgress']){
