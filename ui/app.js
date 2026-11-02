@@ -164,11 +164,12 @@
   function renderBatchControls(){
     const checking=[...batchCandidates.values()].filter(candidate=>candidate.status==='checking').length;
     const clearing=state.clearingDownloadFolder===true;
-    const button=$('#download-selected-mods');
-    button.disabled=preparingBatch||clearing||checking>0||selectedMods.size===0;
-    button.classList.toggle('busy',preparingBatch);button.setAttribute('aria-busy',String(preparingBatch));
     const label=preparingBatch?'Preparing downloads…':`Download selected (${selectedMods.size})`;
-    if(button.textContent!==label)button.textContent=label;
+    for(const button of [$('#download-selected-mods'),$('#floating-download-selected-mods')]){
+      button.disabled=preparingBatch||clearing||checking>0||selectedMods.size===0;
+      button.classList.toggle('busy',preparingBatch);button.setAttribute('aria-busy',String(preparingBatch));
+      const text=$('span',button)||button;if(text.textContent!==label)text.textContent=label;
+    }
     $('#clear-mod-selection').disabled=preparingBatch||(!selectedMods.size&&!checking);
     $('#batch-selection').classList.toggle('hidden',state.mods.length===0);
     let visibleSelected=0;
@@ -188,6 +189,12 @@
     const hidden=selectedMods.size-visibleSelected;
     const message=checking?`Checking ${checking} ${checking===1?'mod':'mods'}…`:hidden?`${hidden} selected ${hidden===1?'mod is':'mods are'} hidden by the current filters.`:'';
     if($('#batch-selection-status').textContent!==message)$('#batch-selection-status').textContent=message;
+    renderFloatingDownload();
+  }
+  function renderFloatingDownload(){
+    const visible=currentPage==='library'&&!detail&&selectedMods.size>0&&$('#download-selected-mods').getBoundingClientRect().bottom<=0;
+    $('#floating-download-selected-mods').classList.toggle('hidden',!visible);
+    document.body.classList.toggle('floating-download-visible',visible);
   }
   async function selectModForDownload(input){
     const key=input.dataset.selectMod;
@@ -252,7 +259,7 @@
   function shortName(name){return String(name||'M').split(/[\s_-]+/).filter(Boolean).slice(0,2).map(x=>x[0]).join('').toUpperCase();}
   function modUrl(mod){return imageUrl(mod.url)||`https://www.nexusmods.com/${encodeURIComponent(modDomain(mod))}/mods/${modId(mod)}`;}
   async function openUrl(url){if(!imageUrl(url))return;await run('openUrl',{url});}
-  function navigate(page){if(!['library','downloads','settings'].includes(page))return;currentPage=page;$$('.page').forEach(el=>el.classList.toggle('active',el.id===`page-${page}`));$$('.nav-item').forEach(el=>{const active=el.dataset.page===page;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});document.documentElement.scrollTop=0;}
+  function navigate(page){if(!['library','downloads','settings'].includes(page))return;currentPage=page;$$('.page').forEach(el=>el.classList.toggle('active',el.id===`page-${page}`));$$('.nav-item').forEach(el=>{const active=el.dataset.page===page;el.classList.toggle('active',active);if(active)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});document.documentElement.scrollTop=0;renderFloatingDownload();scheduleFloatingDownload();}
 
   function renderCounts(){
     $('#library-count').textContent=libraryMods().length;
@@ -580,6 +587,7 @@
     const mod=state.mods.find(m=>modKey(m)===key);if(!mod)return;
     if(!detail)lastFocus=document.activeElement;
     detail={mod,files:[],changelogs:{},requirements:[]};detailTab='files';selectedFiles.clear();filePreviews.clear();
+    renderFloatingDownload();
     for(const background of $$('.sidebar,main'))background.inert=true;
     $('#detail-panel').classList.remove('hidden');$('#detail-scrim').classList.remove('hidden');document.body.style.overflow='hidden';$('#detail-close').focus();
     $('#detail-breadcrumb').textContent=gameName(modDomain(mod)).toUpperCase();$('#detail-content').innerHTML='<div class="loading"><span class="spinner"></span>Getting the latest mod details…</div>';$('#detail-panel').scrollTop=0;$('#detail-content').scrollTop=0;
@@ -587,7 +595,7 @@
     try{const result=await rpc('getModDetails',{gameDomain:modDomain(mod),modId:modId(mod)});if(token!==detailToken)return;detail={...detail,...result,mod:{...mod,...result?.mod},files:result?.files??[]};renderDetail();}
     catch(error){if(token===detailToken)$('#detail-content').innerHTML=`<div class="detail-tab-content"><h3>Couldn’t load this mod</h3><p class="subtle-empty">${esc(error.message)}</p><button class="button" data-detail-retry="${esc(key)}">Try again</button></div>`;}
   }
-  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;for(const background of $$('.sidebar,main'))background.inert=false;if(lastFocus?.isConnected)lastFocus.focus();maybeShowDownloadUpdate();}
+  function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;for(const background of $$('.sidebar,main'))background.inert=false;if(lastFocus?.isConnected)lastFocus.focus();renderFloatingDownload();maybeShowDownloadUpdate();}
   function renderDetail(){
     if(!detail)return;const mod=detail.mod,img=imageUrl(picture(mod));
     $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button id="detail-tab-${tab}" data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}" aria-controls="detail-tab-body" tabindex="${detailTab===tab?0:-1}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body" role="tabpanel" tabindex="0" aria-labelledby="detail-tab-${detailTab}"></div>`;
@@ -775,7 +783,7 @@
       'dialog-website-import':()=>openWebsiteHistory(target),
       'dialog-tracked-import':async()=>{const result=await run('importTracked',{},target);if(result!==null){$('#input-dialog').close();toast('Tracked mods imported into your local library.');}},
       'download-selected':()=>downloadSelected(target),
-      'download-selected-mods':downloadSelectedMods,'clear-mod-selection':clearModSelection
+      'download-selected-mods':downloadSelectedMods,'floating-download-selected-mods':downloadSelectedMods,'clear-mod-selection':clearModSelection
     };if(handlers[target.id])handlers[target.id]();
   });
   document.addEventListener('change',async e=>{
@@ -801,6 +809,9 @@
     }
   });
   $('#mod-search').addEventListener('input',renderMods);$('#mod-sort').addEventListener('change',renderMods);$('#input-form').addEventListener('submit',submitDialog);$('#detail-scrim').addEventListener('click',closeDetail);
+  let floatingDownloadFrame=0;
+  const scheduleFloatingDownload=()=>{if(!floatingDownloadFrame)floatingDownloadFrame=requestAnimationFrame(()=>{floatingDownloadFrame=0;renderFloatingDownload();});};
+  window.addEventListener('scroll',scheduleFloatingDownload,{passive:true});window.addEventListener('resize',scheduleFloatingDownload);
   $('#download-folder').addEventListener('input',e=>{downloadFolderDraft=e.target.value;});
   $('#download-queue-form').addEventListener('submit',saveQueueSettings);
   for(const input of $$('[data-queue-setting]'))input.addEventListener(input.type==='checkbox'?'change':'input',()=>{

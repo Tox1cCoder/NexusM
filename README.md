@@ -64,6 +64,8 @@ If the author has not identified a single replacement, NexusM can notify you whe
 
 For mods with exactly one main file and no optional files, use the checkboxes in **My library**, then **Download selected** to queue up to 100 mods together. Checking a box verifies that mod's current files without opening its details. Mods with file choices explain why they cannot be selected; open their details to choose files. Selections stay when you search or switch games, and **Clear selection** removes them.
 
+With mods selected, a floating **Download selected** button appears when you scroll past the selection bar, so you can start their downloads without scrolling back up.
+
 The batch checks file choices again before queuing, skips files already queued, and keeps failed selections available for retry. Downloads follow the same Nexus authorization, free-account countdown, and sign-in steps as individual downloads.
 
 **Downloaded** flags record exact files downloaded through NexusM; they do not mean a mod is installed. Older website history may have a mod-level download date without a per-file flag.

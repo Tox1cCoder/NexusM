@@ -254,6 +254,65 @@
         expect($('#download-selected-mods').disabled,'Removing a mod during its check must prevent a hidden stale selection.');
         window.NexusM.setState(fixture);
       });
+      await check('floating download action stays reachable and queues the complete selection once',async()=>{
+        const mods=[...fixture.mods.map(mod=>({...mod,version:`${mod.version}-floating-fixture`})),...Array.from({length:40},(_,i)=>({gameDomain:'game1',modId:1000+i,name:`Floating fixture mod ${i}`,version:'1.0'}))];
+        const waitFor=async(predicate,message)=>{
+          for(let attempt=0;attempt<50;attempt++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));}
+          expect(false,message);
+        };
+        const floating=$('#floating-download-selected-mods'),original=$('#download-selected-mods');
+        const shown=()=>!!floating&&floating.getClientRects().length>0;
+        const scrollPastAction=()=>window.scrollTo(0,window.scrollY+original.getBoundingClientRect().bottom+40);
+        try{
+          expect(floating,'The library must provide a floating download action.');
+          $('.toasts').replaceChildren();
+          window.NexusM.setState({...fixture,mods,downloads:[]});window.NexusM.navigate('library');
+          $('#clear-mod-selection').click();
+          expect(!shown(),'The floating action must stay hidden when nothing is selected.');
+          scrollPastAction();await new Promise(resolve=>setTimeout(resolve,100));
+          expect(original.getBoundingClientRect().bottom<0&&!shown(),'Scrolling without a selection must not show an empty download action.');
+          $('[data-select-mod="game1:1"]').click();
+          replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:1,eligible:true,status:'eligible',fileId:101});await settle();
+          await waitFor(shown,'Selecting an eligible mod below the toolbar must show the floating action.');
+          expect(floating.textContent.trim()==='Download selected (1)'&&!floating.disabled,'The floating action must show the selected count and be ready to download.');
+          const rect=floating.getBoundingClientRect(),sidebar=$('.sidebar').getBoundingClientRect();
+          expect(rect.left>=sidebar.right&&rect.right<=document.documentElement.clientWidth&&rect.top>=0&&rect.bottom<=innerHeight&&rect.height>=44,'The floating action must fit in the content viewport with a usable target.');
+          floating.focus({preventScroll:true});expect(document.activeElement===floating,'The floating action must support keyboard focus without scrolling to the toolbar.');
+          window.scrollTo(0,0);await waitFor(()=>!shown(),'Returning to the toolbar must hide the floating action.');
+          scrollPastAction();await waitFor(shown,'The floating action must return when the toolbar scrolls away again.');
+          await window.NexusM.showMod('game1:1');
+          expect(!shown(),'The floating library action must be hidden while mod details are open.');
+          $('#detail-close').click();await waitFor(shown,'Closing details must restore the floating action for the preserved selection.');
+          for(const page of ['downloads','settings']){
+            window.NexusM.navigate(page);expect(!shown(),'The floating library action must not appear on another page.');
+          }
+          window.NexusM.navigate('library');scrollPastAction();await waitFor(shown,'Returning to a scrolled library must restore its selection action.');
+          $('[data-select-mod="game2:3"]').click();
+          expect(floating.disabled&&original.disabled,'Both download actions must wait while another mod is being checked.');
+          replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game2',modId:3,eligible:true,status:'eligible',fileId:103});await settle();
+          expect(floating.textContent.trim()==='Download selected (2)'&&!floating.disabled,'The floating count must update when another mod becomes eligible.');
+          $('#mod-search').value='Floating fixture';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+          expect($('#batch-selection-status').textContent.includes('2 selected mods are hidden'),'Search must retain both selected mods outside the visible rows.');
+          window.NexusM.setState({clearingDownloadFolder:true});
+          expect(floating.disabled&&original.disabled,'Folder cleanup must also disable the floating action.');
+          window.NexusM.setState({clearingDownloadFolder:false});
+          scrollPastAction();await waitFor(shown,'The floating action must remain available when selected mods are filtered out.');
+          const before=requests.filter(request=>request.action==='startBatchDownload').length;
+          floating.click();floating.click();original.click();
+          expect(requests.filter(request=>request.action==='startBatchDownload').length===before+1&&batchDownloadRequest.payload.mods.length===2,'The floating action must queue all selections exactly once, including filtered-out mods.');
+          expect(floating.disabled&&floating.getAttribute('aria-busy')==='true'&&original.disabled&&floating.textContent.trim()===original.textContent,'Both download actions must show the same preparing state.');
+          window.NexusM.receive({id:batchDownloadRequest.id,ok:false,error:'Temporary floating-download fixture failure.'});batchDownloadRequest=null;await settle();
+          expect(shown()&&!floating.disabled&&floating.textContent.trim()==='Download selected (2)','A failed batch must leave the floating action ready to retry the same selection.');
+          $('#clear-mod-selection').click();await waitFor(()=>!shown(),'Clearing the selection must hide the floating action.');
+        }finally{
+          if(batchDownloadRequest){window.NexusM.receive({id:batchDownloadRequest.id,ok:false,error:'Floating fixture ended.'});batchDownloadRequest=null;await settle();}
+          for(const request of batchCandidateRequests.values())window.NexusM.receive({id:request.id,ok:false,error:'Floating fixture ended.'});
+          batchCandidateRequests.clear();
+          if(!$('#detail-panel').classList.contains('hidden'))$('#detail-close').click();
+          $('#clear-mod-selection').click();$('#mod-search').value='';
+          window.NexusM.setState({...fixture,clearingDownloadFolder:false});window.NexusM.navigate('library');$('.toasts').replaceChildren();
+        }
+      });
       await check('unrelated state updates preserve library rows, focus, and game controls',()=>{
         const row=$('#mods-body tr'),game=$('[data-select-game="game1"]'),account=$('#account button');
         row.focus();

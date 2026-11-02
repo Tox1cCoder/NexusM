@@ -62,7 +62,7 @@
     $$('.download-info h3').forEach((element,i)=>remember(element.firstChild,['Improved UI — Main archive','Community Compatibility Patch','Inventory Improvements','Improved Dialogue Interface'][i%4]));
     for(const element of $$('.download-error,.download-error-code'))if(element.firstChild)remember(element.firstChild,element.classList.contains('download-error-code')?'NETWORK_TIMEOUT':'The connection timed out. Retry this download when ready.');
     const scroll=$('#detail-content'),scrollTop=scroll.scrollTop;
-    if(scene==='details')$('.files-toolbar')?.scrollIntoView({block:'start'});else window.scrollTo(0,0);
+    if(scene==='details')$('.files-toolbar')?.scrollIntoView({block:'start'});else if(scene!=='floating-download')window.scrollTo(0,0);
     return ()=>{for(const [node,value]of saved)if(node.isConnected)node.nodeValue=value;scroll.scrollTop=scrollTop;};
   };
   const check = async (name, action, capture=null) => {
@@ -82,6 +82,7 @@
   bridge.postMessage = message => {
     const result = message.action === 'getModDetails' ? details
       : message.action === 'getFileContents' ? {available:true,entries:[{path:`${Array.from({length:12},(_,i)=>`Folder-${i}`).join('/')}/${longWord}.pak`,size:4096}]}
+      : message.action === 'getBatchDownloadCandidates' ? {candidates:message.payload.mods.map(candidate=>({...candidate,eligible:true,status:'eligible',fileId:10,name:'Main archive'}))}
       : null;
     queueMicrotask(()=>window.NexusM.receive(result ? {id:message.id,ok:true,result} : {id:message.id,ok:false,error:'Host mutations are blocked by the layout fixture.'}));
   };
@@ -113,6 +114,25 @@
         for(const selector of ['#refresh-button','#add-game-button','#import-history-button','#add-mod-button','#mod-search','#mod-sort'])reach($(selector),selector);
         window.scrollTo(0,0);
       },'library');
+      await check('Floating download action fits the scrolled library',async()=>{
+        window.NexusM.setState({mods:[mod,...Array.from({length:30},(_,i)=>({...mod,modId:100+i,name:`Community compatibility mod ${i+1}`}))]});
+        window.NexusM.navigate('library');
+        $('[data-select-mod="layoutgame:1"]').click();await settle();
+        window.scrollTo(0,$('#download-selected-mods').getBoundingClientRect().bottom+40);
+        const floating=$('#floating-download-selected-mods');
+        for(let attempt=0;attempt<50&&!visible(floating);attempt++)await new Promise(resolve=>setTimeout(resolve,20));
+        fit(floating,'Floating download action');
+        if(!visible(floating))return;
+        const rect=floating.getBoundingClientRect(),sidebar=$('.sidebar').getBoundingClientRect();
+        if(rect.left<sidebar.right-1||rect.top<0||rect.bottom>innerHeight+1||rect.height<44)fail('The floating action must fit beside the sidebar and remain reachable in the viewport.');
+        if(!floating.contains(document.elementFromPoint((rect.left+rect.right)/2,(rect.top+rect.bottom)/2)))fail('Another element covers the floating action.');
+        floating.focus({preventScroll:true});
+        if(document.activeElement!==floating)fail('The floating action must accept keyboard focus without moving the library.');
+        window.scrollTo(0,document.documentElement.scrollHeight);await settle();
+        if($('#mods-body tr:last-child').getBoundingClientRect().bottom>floating.getBoundingClientRect().top)fail('The floating action obscures the final library row at the bottom of the page.');
+        pageFits();
+      },'floating-download');
+      $('#clear-mod-selection').click();window.NexusM.setState({mods:[mod]});window.scrollTo(0,0);
       await check('Settings content and actions fit',()=>{
         window.NexusM.navigate('settings');pageFits();
         for(const element of $$('#page-settings .settings-card,#page-settings .card-heading,#page-settings .card-footer,#page-settings .setting-row,#page-settings .about-facts'))fit(element,element.className);
