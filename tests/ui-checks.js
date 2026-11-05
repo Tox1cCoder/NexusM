@@ -217,6 +217,10 @@
       await check('batch selections survive filters and queue once while partial failures remain selected',async()=>{
         $('[data-select-mod="game1:1"]').click();$('[data-select-mod="game2:3"]').click();await settle();
         expect($('#download-selected-mods').textContent==='Download selected (2)','Both verified mods should be selected.');
+        $('[data-select-game="game1"]').click();$('[data-select-game="game1"]').click();
+        expect($('[data-select-mod="game2:3"]').checked&&$('#batch-selection-status').textContent.includes('1 selected mod is hidden'),'Excluding a game must retain its selected mods and explain the hidden selection.');
+        $('[data-select-game=""]').click();
+        expect($('[data-select-mod="game1:1"]').checked&&$('#download-selected-mods').textContent==='Download selected (2)','Resetting a game exclusion must restore checked rows without clearing the download batch.');
         $('#mod-search').value='Alpha';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
         expect($('#batch-selection-status').textContent.includes('1 selected mod is hidden'),'The selection count must include mods hidden by search.');
         window.NexusM.setState({clearingDownloadFolder:true});
@@ -342,6 +346,111 @@
       await check('game selection scopes the table',()=>{
         $('[data-select-game="game1"]').click();expect($$('#mods-body tr[data-mod-key]').length===2,'Game filter should show two mods.');
         $('[data-select-game=""]').click();
+      });
+      await check('game cards cycle only, exclude, and all with clear accessible state and stable focus',()=>{
+        const game=()=>$('[data-select-game="game1"]');
+        try{
+          game().focus();game().click();
+          expect(game().dataset.gameFilterState==='only'&&game().getAttribute('aria-pressed')==='true','The first click must select only that game.');
+          expect(game().closest('.game-card').classList.contains('selected')&&game().querySelector('.game-filter-badge').textContent==='Only','The only-game state must have a visible text indicator.');
+          expect(/only/i.test(game().getAttribute('aria-label'))&&/exclude/i.test(game().getAttribute('aria-label')),'The accessible name must describe the current state and next action.');
+          expect(document.activeElement===game(),'Cycling a focused game must retain keyboard focus on its replacement button.');
+          expect($('#all-count').textContent==='2'&&$('#updates-count').textContent==='1'&&$('#visible-count').textContent==='2 of 2 mods','Only-game counts must describe that game.');
+          expect($('#game-filter-status').textContent.includes('Test Game 1')&&!$('#clear-game-filter').classList.contains('hidden'),'The active filter must have a named summary and reachable reset.');
+          game().click();
+          expect(game().dataset.gameFilterState==='exclude'&&game().getAttribute('aria-pressed')==='true','The second click must apply a game exclusion.');
+          expect(game().closest('.game-card').classList.contains('excluded')&&!game().closest('.game-card').classList.contains('selected')&&game().querySelector('.game-filter-badge').textContent==='Excluded','Exclusion must use a distinct card treatment and text badge.');
+          expect(/excluded/i.test(game().getAttribute('aria-label'))&&/all games/i.test(game().getAttribute('aria-label')),'An excluded game must announce its current state and reset action.');
+          expect(document.activeElement===game(),'Focus must remain on the game after changing from only to excluded.');
+          expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='game2:3','Exclusion must show other games and hide every mod from the excluded game.');
+          expect($('#mods-title').textContent==='All mods except Test Game 1'&&$('#all-count').textContent==='1'&&$('#updates-count').textContent==='1'&&$('#visible-count').textContent==='1 of 1 mod','Exclusion heading and counts must match the remaining rows.');
+          expect($('[data-select-game=""] small').textContent==='3 mods'&&$('[data-select-game=""]').getAttribute('aria-pressed')==='false','The All games card must keep the base total without claiming the exclusion is unfiltered.');
+          expect(/except|exclud/i.test($('#game-filter-status').textContent)&&$('#game-filter-status').textContent.includes('Test Game 1'),'The filter summary must identify the excluded game.');
+          game().click();
+          expect(game().dataset.gameFilterState==='all'&&game().getAttribute('aria-pressed')==='false'&&!game().querySelector('.game-filter-badge'),'The third click must restore the neutral game state.');
+          expect($$('#mods-body tr[data-mod-key]').length===3&&$('[data-select-game=""]').getAttribute('aria-pressed')==='true'&&$('#clear-game-filter').classList.contains('hidden'),'Completing the cycle must restore all games and hide the reset.');
+          expect(document.activeElement===game(),'The complete cycle must remain usable by keyboard without losing focus.');
+        }finally{$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
+      });
+      await check('another game replaces the criterion and both reset actions clear exclusions',()=>{
+        try{
+          $('[data-select-game="game1"]').click();$('[data-select-game="game1"]').click();
+          $('[data-select-game="game2"]').click();
+          expect($('[data-select-game="game1"]').dataset.gameFilterState==='all'&&$('[data-select-game="game2"]').dataset.gameFilterState==='only','Choosing another game must replace the old exclusion with only the new game.');
+          expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='game2:3'&&!$('.game-card.excluded'),'Switching games must not leave a hidden exclusion active.');
+          $('[data-select-game="game2"]').click();$('#clear-game-filter').focus();$('#clear-game-filter').click();
+          expect($$('#mods-body tr[data-mod-key]').length===3&&!$('.game-card.excluded')&&!$('#clear-game-filter').getClientRects().length,'Clear game filter must restore the full current scope.');
+          expect(document.activeElement&&document.activeElement!==document.body&&document.activeElement.getClientRects().length,'Clearing from the reset control must leave focus on a visible control.');
+          $('[data-select-game="game1"]').click();$('[data-select-game="game1"]').click();$('[data-select-game=""]').click();
+          expect($$('#mods-body tr[data-mod-key]').length===3&&$('#mods-title').textContent==='All mods'&&!$('.game-card.excluded'),'All games must always clear an active exclusion.');
+        }finally{$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
+      });
+      await check('cycling games preserves search, review, and sort choices',()=>{
+        try{
+          $('#mod-search').value='patch';$('#mod-search').dispatchEvent(new Event('input',{bubbles:true}));
+          $('#mod-sort').value='name';$('#mod-sort').dispatchEvent(new Event('change',{bubbles:true}));
+          $('[data-filter="updates"]').click();
+          $('[data-select-game="game1"]').click();
+          expect($$('#mods-body tr[data-mod-key]').length===0&&$('#mods-body .no-results'),'Only-game scope must combine with the current search.');
+          $('[data-select-game="game1"]').click();
+          expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='game2:3','Exclusion must combine with the existing search and review filter.');
+          $('#clear-game-filter').click();
+          expect($('#mod-search').value==='patch'&&$('#mod-sort').value==='name'&&$('[data-filter="updates"]').classList.contains('active'),'Resetting the game filter must preserve independent browsing choices.');
+          expect($$('#mods-body tr[data-mod-key]').length===1&&$('#mods-body tr').dataset.modKey==='game2:3','Reset must apply the retained search and review filter.');
+        }finally{$('#mod-search').value='';$('#mod-sort').value='updated';$('[data-filter="all"]').click();$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
+      });
+      await check('game exclusion survives live updates and resets when that game is removed',()=>{
+        try{
+          $('[data-select-game="game1"]').click();$('[data-select-game="game1"]').click();
+          const added={gameDomain:'game2',modId:8,name:'Live other-game mod',version:'1.0',needsReview:false};
+          window.NexusM.receive({event:'state',data:{mods:[...fixture.mods,added]}});
+          expect($('[data-select-game="game1"]').dataset.gameFilterState==='exclude'&&$$('#mods-body tr[data-mod-key]').length===2&&$('#all-count').textContent==='2'&&$('#updates-count').textContent==='1','Live library changes must retain exclusion and recalculate the remaining counts.');
+          expect(!$('#mods-body').textContent.includes('Alpha overhaul'),'A state refresh must not bring the excluded game back into the table.');
+          window.NexusM.receive({event:'state',data:{games:fixture.games.filter(game=>game.domain!=='game1')}});
+          expect(!$('.game-card.excluded')&&$('[data-select-game=""]').getAttribute('aria-pressed')==='true'&&$('#mods-title').textContent==='All mods','Removing the excluded game must clear its obsolete filter.');
+        }finally{$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
+      });
+      await check('excluding every available mod gives a recoverable filter result instead of history import',()=>{
+        try{
+          window.NexusM.setState({mods:fixture.mods.filter(mod=>mod.gameDomain==='game1')});
+          $('[data-select-game="game1"]').click();$('[data-select-game="game1"]').click();
+          expect($('#library-empty').classList.contains('hidden')&&!$('#mods-table-wrap').classList.contains('hidden')&&$('#mods-body .no-results'),'A zero-row exclusion must remain a filter result, not imply that history is missing.');
+          expect($('#visible-count').textContent==='0 of 0 mods'&&$('#all-count').textContent==='0','An exclusion hiding the full scope must show zero counts.');
+          const reset=$('#mods-body [data-clear-game-filter]');
+          expect(reset&&reset.tagName==='BUTTON','The no-results state must offer a direct game-filter reset.');
+          reset.focus();reset.click();
+          expect($$('#mods-body tr[data-mod-key]').length===2&&$('#mods-title').textContent==='All mods','The empty-result action must immediately recover the excluded mods.');
+          expect(document.activeElement&&document.activeElement!==document.body&&document.activeElement.getClientRects().length,'Resetting an empty result must leave keyboard focus on a visible control.');
+          $('[data-select-game="game9"]').click();
+          expect(!$('#library-empty').classList.contains('hidden'),'Only an unimported game should show its history-import empty state.');
+          $('[data-select-game="game9"]').click();
+          expect($('#library-empty').classList.contains('hidden')&&$$('#mods-body tr[data-mod-key]').length===2,'Excluding an unimported game must show the existing library instead of asking to import it.');
+        }finally{$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
+      });
+      await check('Your games only combines with exclusion without restoring excluded records',async()=>{
+        try{
+          $('[data-select-game="game1"]').click();$('[data-select-game="game1"]').click();
+          $('#your-games-only').click();await settle();
+          expect($('[data-select-game="game1"]').dataset.gameFilterState==='exclude'&&$$('#mods-body tr[data-mod-key]').length===2,'Expanding to all imported history must retain the game exclusion.');
+          expect($('#mods-body').textContent.includes('Preserved old-game history')&&!$('#mods-body').textContent.includes('Alpha overhaul'),'The expanded scope must include removed-game history and still omit the excluded game.');
+          expect($('#all-count').textContent==='2'&&$('[data-select-game=""] small').textContent==='4 mods','Filtered counts and base-scope counts must stay distinct.');
+          $('#your-games-only').click();await settle();
+          expect($('[data-select-game="game1"]').dataset.gameFilterState==='exclude'&&$$('#mods-body tr[data-mod-key]').length===1&&$('#all-count').textContent==='1','Restoring Your games only must retain exclusion with the narrower counts.');
+        }finally{$('[data-select-game=""]').click();window.NexusM.setState(fixture);}
+      });
+      await check('manual update checks target only-mode games and never target an excluded game',async()=>{
+        try{
+          $('[data-select-game="game1"]').click();$('#refresh-button').click();
+          expect(refreshRequest?.payload.gameDomain==='game1','Only mode must retain the existing selected-game update check.');
+          window.NexusM.receive({id:refreshRequest.id,ok:true,result:{}});refreshRequest=null;await settle();
+          $('[data-select-game="game1"]').click();$('#refresh-button').click();
+          expect(refreshRequest&&!Object.prototype.hasOwnProperty.call(refreshRequest.payload,'gameDomain'),'An exclusion is a browsing filter; the normal all-game check must not target the excluded game.');
+          window.NexusM.receive({id:refreshRequest.id,ok:true,result:{}});refreshRequest=null;await settle();
+          expect($('[data-select-game="game1"]').dataset.gameFilterState==='exclude'&&$$('#mods-body tr[data-mod-key]').length===1,'Finishing an update check must retain the exclusion.');
+        }finally{
+          if(refreshRequest){window.NexusM.receive({id:refreshRequest.id,ok:true,result:{}});refreshRequest=null;await settle();}
+          $('[data-select-game=""]').click();window.NexusM.setState(fixture);
+        }
       });
       await check('newly synced games explain missing browser history and open the selected import',async()=>{
         const game={id:100,domain:'phantombladezero',name:'Phantom Blade Zero'};

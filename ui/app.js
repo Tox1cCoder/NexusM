@@ -15,7 +15,8 @@
   const pending = new Map();
   let sequence = 0;
   let state = {games:[],mods:[],downloads:[],downloadUpdates:[],settings:{yourGamesOnly:true},user:null};
-  let activeGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
+  // A single game criterion: only activeGame, exclude excludedGame, or neither for all games.
+  let activeGame = null, excludedGame = null, filter = 'all', currentPage = 'library', detail = null, detailTab = 'files', detailToken = 0, modalConfig = null;
   let selectedFiles = new Set();
   let fileBatch = null;
   const selectedMods = new Set(), batchCandidates = new Map();
@@ -123,6 +124,7 @@
     state.games=Array.isArray(state.games)?state.games:[];state.mods=Array.isArray(state.mods)?state.mods:[];state.downloads=Array.isArray(state.downloads)?state.downloads:[];
     state.downloadUpdates=Array.isArray(state.downloadUpdates)?state.downloadUpdates:[];
     if(activeGame&&!state.games.some(g=>gameDomain(g)===activeGame))activeGame=null;
+    if(excludedGame&&!state.games.some(g=>gameDomain(g)===excludedGame))excludedGame=null;
     const nextGames=JSON.stringify(state.games);
     const gamesChanged=nextGames!==gamesSignature;
     const nextLibrary=JSON.stringify([nextGames,state.settings.yourGamesOnly,state.mods.map(mod=>[modDomain(mod),modId(mod),mod.name,mod.version,mod.author,mod.uploaded_by,picture(mod),timestamp(updated(mod)),timestamp(downloaded(mod)),needsReview(mod)])]);
@@ -303,20 +305,46 @@
     const navigation=$('.nav-item[data-page="downloads"]');if(navigation.title!==(total?summary:'Downloads'))navigation.title=total?summary:'Downloads';
   }
   function renderGames(){
-    const total=libraryMods().length;
-    setHtml('#game-strip',`<button class="game-card all-games ${activeGame?'':'selected'}" data-select-game="" aria-pressed="${!activeGame}">${icon('library')}<strong>All games</strong><small>${total} ${total===1?'mod':'mods'}</small></button>`+
-      state.games.map(g=>{const domain=gameDomain(g),img=imageUrl(g.imageUrl??g.image_url??g.tile_image??g.image),count=gameModCounts.get(domain)||0;return `<div class="game-card ${activeGame===domain?'selected':''}"><button class="game-select" data-select-game="${esc(domain)}" aria-label="Show ${esc(g.name)} mods" aria-pressed="${activeGame===domain}" title="${esc(g.name)} · ${count} mods">${img?`<img src="${esc(img)}" alt="" loading="lazy"><span class="game-label">${esc(g.name)}</span>`:`<span class="game-fallback">${icon('game')}<span>${esc(g.name)}</span></span>`}</button><button class="game-remove" data-remove-game="${esc(domain)}" aria-label="Remove ${esc(g.name)} from your games" title="Remove from your games">×</button></div>`;}).join('')+
+    const total=libraryMods().length,allGames=!activeGame&&!excludedGame;
+    const focused=document.activeElement?.closest('#game-strip button');
+    const focusKey=focused?.hasAttribute('data-select-game')?'selectGame':focused?.hasAttribute('data-remove-game')?'removeGame':null;
+    const focusDomain=focusKey?focused.dataset[focusKey]:null;
+    setHtml('#game-strip',`<button class="game-card all-games ${allGames?'selected':''}" data-select-game="" data-game-filter-state="all" aria-label="Show all games. Clear the game filter." aria-pressed="${allGames}">${icon('library')}<strong>All games</strong><small>${total} ${total===1?'mod':'mods'}</small></button>`+
+      state.games.map(g=>{
+        const domain=gameDomain(g),img=imageUrl(g.imageUrl??g.image_url??g.tile_image??g.image),count=gameModCounts.get(domain)||0;
+        const mode=activeGame===domain?'only':excludedGame===domain?'exclude':'all';
+        const label=mode==='only'?`${g.name}. Only this game's mods. Click to exclude this game.`:mode==='exclude'?`${g.name}. Excluded. Click to show all games.`:`${g.name}. Click to show only this game's mods.`;
+        const badge=mode==='all'?'':`<span class="game-filter-badge">${icon(mode==='exclude'?'exclude':'check')}${mode==='exclude'?'Excluded':'Only'}</span>`;
+        return `<div class="game-card ${mode==='only'?'selected':mode==='exclude'?'excluded':''}"><button class="game-select" data-select-game="${esc(domain)}" data-game-filter-state="${mode}" aria-label="${esc(label)}" aria-describedby="game-filter-help" aria-pressed="${mode!=='all'}" title="${esc(g.name)} · ${count} mods · ${esc(label)}">${img?`<img src="${esc(img)}" alt="" loading="lazy"><span class="game-label">${esc(g.name)}</span>`:`<span class="game-fallback">${icon('game')}<span>${esc(g.name)}</span></span>`}${badge}</button><button class="game-remove" data-remove-game="${esc(domain)}" aria-label="Remove ${esc(g.name)} from your games" title="Remove from your games">×</button></div>`;
+      }).join('')+
       `<button class="game-card add-game-card" id="game-strip-add">${icon('plus')}<span>Add a game</span></button>`);
+    const summary=activeGame?`Only ${gameName(activeGame)}`:excludedGame?`All games except ${gameName(excludedGame)}`:'All games';
+    const status=$('#game-filter-status'),text=`${summary} · ${state.settings.yourGamesOnly===false?'All imported mods':'Your games only'}`;
+    if(status.textContent!==text)status.textContent=text;
+    status.dataset.state=activeGame?'only':excludedGame?'exclude':'all';
+    $('#clear-game-filter').classList.toggle('hidden',allGames);
+    // Replacing the cards must not interrupt Enter/Space cycling or steal focus from search.
+    if(focused&&!focused.isConnected){
+      const replacement=focusKey?$$('#game-strip button').find(button=>button.dataset[focusKey]===focusDomain):$('#game-strip-add');
+      (replacement||$('[data-select-game=""]')).focus({preventScroll:true});
+    }
+  }
+  function cycleGameFilter(domain){
+    if(!domain){activeGame=null;excludedGame=null;}
+    else if(activeGame===domain){activeGame=null;excludedGame=domain;}
+    else if(excludedGame===domain){activeGame=null;excludedGame=null;}
+    else{activeGame=domain;excludedGame=null;}
+    renderGames();renderMods();
   }
   function renderCheckDate(){$('#last-checked').textContent=state.lastCheckedAt?`Checked ${date(state.lastCheckedAt,true)}`:'Not checked yet';}
   function renderMods(){
     const library=libraryMods();
-    const scoped=library.filter(m=>!activeGame||modDomain(m)===activeGame);
+    const scoped=library.filter(m=>(!activeGame||modDomain(m)===activeGame)&&(!excludedGame||modDomain(m)!==excludedGame));
     const search=$('#mod-search').value.trim().toLowerCase();
     let mods=scoped.filter(m=>(filter!=='updates'||needsReview(m))&&(!search||`${m.name} ${m.author??m.uploaded_by??''} ${gameName(modDomain(m))}`.toLowerCase().includes(search)));
     const sort=$('#mod-sort').value;
     mods.sort((a,b)=>sort==='name'?String(a.name).localeCompare(String(b.name)):sort==='downloaded'?timestamp(downloaded(b))-timestamp(downloaded(a)):timestamp(updated(b))-timestamp(updated(a)));
-    $('#mods-title').textContent=activeGame?gameName(activeGame):'All mods';
+    $('#mods-title').textContent=activeGame?gameName(activeGame):excludedGame?`All mods except ${gameName(excludedGame)}`:'All mods';
     $('#all-count').textContent=scoped.length;$('#updates-count').textContent=scoped.filter(needsReview).length;
     renderCheckDate();
     const emptyGame=!!activeGame&&scoped.length===0,empty=emptyGame||library.length===0;
@@ -327,7 +355,8 @@
     $('#empty-import').textContent=emptyGame?'Import this game’s history':'Import download history';
     $('#library-empty').classList.toggle('hidden',!empty);$('#mods-table-wrap').classList.toggle('hidden',empty);$('#table-footer').classList.toggle('hidden',empty);
     $('#visible-count').textContent=`${mods.length} of ${scoped.length} ${scoped.length===1?'mod':'mods'}`;
-    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td class="mod-select-cell"><label class="mod-select-target"><input type="checkbox" data-select-mod="${esc(modKey(m))}" aria-label="Select ${esc(m.name)} for download" aria-describedby="batch-mod-${esc(modKey(m))}"></label></td><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small><small class="batch-mod-status hidden" id="batch-mod-${esc(modKey(m))}"></small></span></div></td><td data-label="Version" headers="mods-version"><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date" data-label="Last downloaded" headers="mods-downloaded">${dateCell(downloaded(m))}</td><td class="table-date" data-label="Updated" headers="mods-updated">${dateCell(updated(m))}</td><td data-label="Status" headers="mods-status"><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || '<tr><td colspan="7" class="no-results">No mods match this view. Try another game or search.</td></tr>');
+    const noResults=excludedGame?`No mods match this view while ${esc(gameName(excludedGame))} is excluded. <button class="text-button" data-clear-game-filter>Clear game filter</button>`:'No mods match this view. Try another game or search.';
+    setHtml('#mods-body',mods.map(m=>{const img=imageUrl(picture(m));const review=needsReview(m),hasDownload=!!timestamp(downloaded(m));return `<tr tabindex="0" data-mod-key="${esc(modKey(m))}" aria-label="View ${esc(m.name)}"><td class="mod-select-cell"><label class="mod-select-target"><input type="checkbox" data-select-mod="${esc(modKey(m))}" aria-label="Select ${esc(m.name)} for download" aria-describedby="batch-mod-${esc(modKey(m))}"></label></td><td><div class="mod-cell">${img?`<img class="mod-thumb" src="${esc(img)}" loading="lazy" alt="">`:`<span class="mod-thumb fallback">${esc(shortName(m.name))}</span>`}<span><strong class="mod-name" title="${esc(m.name)}">${esc(m.name)}</strong><small class="mod-game">${esc(gameName(modDomain(m)))}${m.author?` · ${esc(m.author)}`:''}</small><small class="batch-mod-status hidden" id="batch-mod-${esc(modKey(m))}"></small></span></div></td><td data-label="Version" headers="mods-version"><span class="version-chip">${esc(m.version||'—')}</span></td><td class="table-date" data-label="Last downloaded" headers="mods-downloaded">${dateCell(downloaded(m))}</td><td class="table-date" data-label="Updated" headers="mods-updated">${dateCell(updated(m))}</td><td data-label="Status" headers="mods-status"><span class="badge ${review?'update':hasDownload?'current':''}">${review?'Needs review':hasDownload?'Downloaded':'Unreviewed'}</span></td><td>${icon('chevron').replace('<svg','<svg class="row-chevron"')}</td></tr>`;}).join('') || `<tr><td colspan="7" class="no-results">${noResults}</td></tr>`);
     renderBatchControls();
   }
   function renderDownloads(){
@@ -771,7 +800,8 @@
     const target=e.target.closest('button,a,tr[data-mod-key]');if(!target)return;
     if(target.matches('a')){e.preventDefault();if(target.classList.contains('brand'))navigate('library');else if(target.href)openUrl(target.href);return;}
     if(target.dataset.page){navigate(target.dataset.page);return;}
-    if(target.hasAttribute('data-select-game')){activeGame=target.dataset.selectGame||null;renderGames();renderMods();return;}
+    if(target.hasAttribute('data-select-game')){cycleGameFilter(target.dataset.selectGame);return;}
+    if(target.hasAttribute('data-clear-game-filter')){const restoreFocus=target===document.activeElement;cycleGameFilter('');if(restoreFocus)$('[data-select-game=""]').focus({preventScroll:true});return;}
     if(target.dataset.removeGame){const domain=target.dataset.removeGame;showDialog({title:'Remove this game?',description:`Remove ${gameName(domain)} from your games? Your downloaded archives stay in your folder.`,body:'<p class="dialog-tip">You can add the game again later.</p>',submit:'Remove game',onSubmit:async()=>{consume(await rpc('removeGame',{domain}));return true;}});return;}
     if(target.dataset.modKey){showMod(target.dataset.modKey);return;}
     if(target.dataset.filter){filter=target.dataset.filter;$$('[data-filter]').forEach(b=>b.classList.toggle('active',b===target));renderMods();return;}

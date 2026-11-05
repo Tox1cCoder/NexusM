@@ -27,7 +27,8 @@ You can also use **Add mod** to paste a Nexus mod-page link, or **Import tracked
 Your saved library appears when the app opens. Once connected, NexusM syncs your favourite games and checks known mods automatically. Use **Check for updates** to check again while the app is open.
 
 - **Your games only** shows and checks mods for the games in your game list. Turn it off to include imported history for other games.
-- Select a game to narrow the list and update check to that game.
+- Click a game to cycle through **Only** that game's mods, **Exclude** that game's mods, and **All games**. The card badge and summary show the current filter. Choosing a different game starts at **Only**; **All games** or **Clear game filter** resets it. Search, sorting, and **Needs review** continue to apply within the game filter.
+- **Only** also narrows a manual update check to that game. **Exclude** filters browsing; update checks still check all games in the current **Your games only** scope. Game filters last until you change them or close the app.
 - **Needs review** means the mod changed after your last download or review. Open it and read the author's notes; the change may concern an optional file you do not use.
 - **Mark reviewed** dismisses the current update without changing your download date.
 

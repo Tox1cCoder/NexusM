@@ -114,6 +114,33 @@
         for(const selector of ['#refresh-button','#add-game-button','#import-history-button','#add-mod-button','#mod-search','#mod-sort'])reach($(selector),selector);
         window.scrollTo(0,0);
       },'library');
+      try{
+        await check('Game filter modes keep badges and reset controls readable',()=>{
+          window.NexusM.navigate('library');
+          fit($('#game-filter-help'),'Game filter instructions');
+          for(const mode of ['only','exclude']){
+            $('[data-select-game="layoutgame"]').click();
+            const select=$('[data-select-game="layoutgame"]'),card=select.closest('.game-card'),badge=$('.game-card .game-filter-badge');
+            const status=$('#game-filter-status'),clear=$('#clear-game-filter');
+            if(select.dataset.gameFilterState!==mode||!card.classList.contains(mode==='only'?'selected':'excluded'))fail(`The ${mode} mode must remain visible on the active card.`);
+            if(!badge||!select.contains(badge)){fail(`The ${mode} card is missing its state badge.`);continue;}
+            fit(badge,`${mode} badge`);fit(status,`${mode} summary`);fit(clear,`${mode} reset control`);
+            const rect=badge.getBoundingClientRect(),bounds=select.getBoundingClientRect();
+            if(rect.left<bounds.left-1||rect.right>bounds.right+1||rect.top<bounds.top-1||rect.bottom>bounds.bottom+1||badge.scrollHeight>badge.clientHeight+1)fail(`The ${mode} badge must fit inside the game card without clipping.`);
+            // Check the remove control in the same visible state it has on hover.
+            const remove=card.querySelector('.game-remove');remove.style.display='block';
+            try{
+              const removal=remove.getBoundingClientRect();
+              if(rect.left<removal.right&&rect.right>removal.left&&rect.top<removal.bottom&&rect.bottom>removal.top)fail(`The ${mode} badge overlaps the remove-game control.`);
+            }finally{remove.style.removeProperty('display');}
+            reach(status,`${mode} summary`);reach(clear,`${mode} reset control`);
+            clear.focus({preventScroll:true});
+            if(document.activeElement!==clear)fail(`The ${mode} reset control must accept keyboard focus.`);
+            pageFits();
+          }
+          window.scrollTo(0,0);
+        },'excluded-library');
+      }finally{$('[data-select-game=""]').click();window.scrollTo(0,0);}
       await check('Floating download action fits the scrolled library',async()=>{
         window.NexusM.setState({mods:[mod,...Array.from({length:30},(_,i)=>({...mod,modId:100+i,name:`Community compatibility mod ${i+1}`}))]});
         window.NexusM.navigate('library');
