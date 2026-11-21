@@ -233,6 +233,15 @@ select{appearance:auto;background:#25282e;border:1px solid #363941;color:#aeb4c0
 .rich-text blockquote{border-left:2px solid #80603d;padding:7px 12px;margin:12px 0;background:#28272a}
 .details-note{display:flex;gap:9px;background:#292920;border:1px solid #444333;padding:11px 12px;border-radius:5px;font-size:10px;line-height:1.7;color:#b1ac91;margin-bottom:20px}
 .details-note svg{width:15px;height:15px;margin-top:2px}
+.installation-warning{display:flex;align-items:flex-start;gap:10px;margin:0 27px 20px;padding:14px;border:1px solid #96733d;border-radius:6px;background:#342c20;color:#e8c58f;font-size:11px;line-height:1.7}
+.installation-warning>svg{color:#ffc878;margin-top:2px}
+.installation-warning>div{min-width:0}
+.installation-warning strong{color:#ffe0ab;font-size:12px}
+.installation-warning p{margin:5px 0 8px}
+.installation-warning ul{margin:0 0 6px;padding-left:17px}
+.installation-warning li{margin:7px 0}
+.installation-warning-note{display:block;color:#e2d3bd}
+.installation-warning .text-button{max-width:100%;white-space:normal;text-align:left;color:#ffd190}
 .files-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
 .files-toolbar p{color:#7c899c;font-size:10px;margin:0}
 .file-group{margin:24px 0}
@@ -254,6 +263,11 @@ select{appearance:auto;background:#25282e;border:1px solid #363941;color:#aeb4c0
 .changelog-entry{border-left:1px solid #3b444f;padding:0 0 25px 20px;margin-left:4px;position:relative}
 .changelog-entry::before{content:"";position:absolute;left:-4px;top:5px;border-radius:50%;width:7px;height:7px;background:#b58a62}
 .changelog-entry h3{font-size:12px;color:#d5dce5;margin-bottom:10px}
+.changelog-entry-warning{border-left-color:#d9a45d}
+.changelog-entry-warning::before{background:#ffc878}
+.changelog-entry-warning h3::after{content:"Installation note";display:inline-block;margin:5px 0 0 9px;padding:1px 6px;border:1px solid #96733d;border-radius:4px;color:#ffd190;font-size:10px;font-weight:400}
+.changelog-installation-note{background:#342c20;border-radius:4px;box-shadow:0 0 0 1px #96733d;padding:8px 10px;margin:8px 0;color:#f2d7ac;scroll-margin-block:65px}
+.changelog-installation-note:focus{outline:2px solid var(--orange);outline-offset:3px}
 .requirement-card{min-width:0;border:1px solid #3a424e;border-radius:5px;background:#252a32;padding:13px 15px;display:flex;align-items:center;justify-content:space-between;margin-bottom:9px;gap:15px}
 .requirement-card strong{font-size:11px;line-height:1.6;color:#d3dbe7}
 .requirement-card p{font-size:10px;color:#8998ab;margin:5px 0 0;line-height:1.7}

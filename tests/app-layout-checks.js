@@ -11,7 +11,7 @@
   const details = {
     mod:{...mod,summary:longText,description:`<p>${longText}</p><table><tr><th>File</th><th>Installation instructions</th></tr><tr><td>${longWord}</td><td>${longText}</td></tr></table><pre><code>${longWord.repeat(4)}</code></pre>`},
     files:[{fileId:10,name:longWord,category:'MAIN',version:longWord,size:4096,uploadedAt:1792450000,description:longText}],
-    changelogs:{[longWord]:[longText]},
+    changelogs:{[longWord]:[`Reinstall required. ${longWord} ${longText}`]},
     requirements:[{name:longWord,notes:longText,url:'https://www.nexusmods.com/layoutgame/mods/2'}]
   };
   const errors = [];
@@ -202,6 +202,7 @@
         await Promise.all(panel.getAnimations().map(animation=>animation.finished.catch(()=>{})));
         fit(panel,'Mod details');
         for(const element of $$('.detail-topbar,.detail-intro,.detail-tabs,.detail-tab-content,.file-card,.file-card-head,.file-card-meta,.file-card-actions'))fit(element,element.className);
+        fit($('.installation-warning'),'Installation warning');fit($('.installation-warning-note'),'Installation instruction excerpt');
         const select=$('[data-select-file="10"]');select.click();
         $('[data-preview-file="10"]').click();await settle();
         for(const folder of $$('.preview-folder'))folder.open=true;
@@ -214,7 +215,8 @@
       await check('Overview, changelog, and requirements fit',()=>{
         const panel=$('#detail-panel');
         for(const tab of ['overview','changelog','requirements']){
-          $(`[data-detail-tab="${tab}"]`).click();fit(panel,`${tab} panel`);fit($('#detail-tab-body'),`${tab} content`);
+          $(`[data-detail-tab="${tab}"]`).click();fit(panel,`${tab} panel`);fit($('#detail-tab-body'),`${tab} content`);fit($('.installation-warning'),'Persistent installation warning');
+          if(tab==='changelog')fit($('.changelog-installation-note'),'Highlighted installation instruction');
           if(tab==='overview'){
             if(!$('.rich-text table')||!$('.rich-text pre'))fail('Wide author content must be preserved.');
             for(const element of $$('.rich-text table,.rich-text pre')){

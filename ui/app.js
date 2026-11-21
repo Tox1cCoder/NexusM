@@ -656,7 +656,9 @@
   function closeDetail(){detailToken++;filePreviews.clear();$('#detail-panel').classList.add('hidden');$('#detail-scrim').classList.add('hidden');document.body.style.overflow='';detail=null;for(const background of $$('.sidebar,main'))background.inert=false;if(lastFocus?.isConnected)lastFocus.focus();renderFloatingDownload();maybeShowDownloadUpdate();}
   function renderDetail(){
     if(!detail)return;const mod=detail.mod,img=imageUrl(picture(mod));
+    detail.changelogEntries=prepareChangelogs(detail.changelogs);
     $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button id="detail-tab-${tab}" data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}" aria-controls="detail-tab-body" tabindex="${detailTab===tab?0:-1}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body" role="tabpanel" tabindex="0" aria-labelledby="detail-tab-${detailTab}"></div>`;
+    $('.detail-intro').insertAdjacentHTML('afterend',renderInstallationWarning());
     renderDetailTab();
   }
   function activateDetailTab(tab,focus=false){
@@ -739,6 +741,49 @@
     }
     return versionCollator.compare(String(b),String(a));
   }
+  function changelogText(source){
+    const template=document.createElement('template');template.innerHTML=richText(source);
+    // Keep inline word fragments together, but separate paragraphs and line breaks.
+    for(const node of template.content.querySelectorAll('br,p,div,li,h1,h2,h3,h4,h5,h6,tr,td,th,blockquote,pre,summary')){
+      const separator=node.tagName==='BR'?' ':'\n';node.before(document.createTextNode(separator));node.after(document.createTextNode(separator));
+    }
+    const decoded=document.createElement('textarea');decoded.innerHTML=template.content.textContent.replace(/</g,'&lt;');
+    return decoded.value.replace(/[^\S\n]+/g,' ').trim();
+  }
+  function installationInstruction(text){
+    const normalized=text.replace(/[\u2010-\u2015\u2212]/g,'-');
+    const reinstall=/\b(?:re[\s-]?install(?:ation|ing|ed|s)?|un[\s-]?install(?:ation|ing|ed|s)?|(?:clean|fresh)[\s-]+install(?:ation)?)\b/;
+    const removeOld=/\b(?:remov(?:e|ing)|delet(?:e|ing))\b[^!?;\n]{0,100}?\b(?:old|older|previous|prior|existing|outdated)\b[^!?;\n]{0,60}?(?:\b(?:versions?|installations?|files?|folders?|mods?|archives?)\b|\.[a-z][a-z0-9]{1,8}\b)/;
+    const removeBeforeInstall=/\b(?:remove|delete)\b[^!?;\n]{0,80}?\b(?:mods?|files?|folders?|installations?)\b[^!?;\n]{0,50}?\bbefore\b[^!?;\n]{0,30}?\b(?:updat(?:e|ing)|upgrad(?:e|ing)|install(?:ing|ation)?)\b/;
+    const actions=new RegExp([reinstall.source,removeOld.source,removeBeforeInstall.source].join('|'),'gi');
+    const negatedBefore=/\b(?:no(?:\s+need\s+(?:to|for))?|(?:do(?:es)?\s+not|don['’]t|doesn['’]t)(?:\s+(?:need|have)\s+to)?|need\s+not|never|without|(?:not|no\s+longer)\s+(?:necessary|required|needed)\s+to|instead\s+of|rather\s+than)(?:\s+(?:a|an|the|full|fully|complete|completely|manually|always|necessarily|do|perform))*\s*$/i;
+    const negatedAfter=/^(?:\s+(?:the|this|your|old|previous|existing|mod|version|files|first|it)){0,5}\s*(?:(?:is|are|was|were|will\s+be)\s+)?(?:not\s+(?:required|necessary|needed|recommended)|no\s+longer\s+(?:required|necessary|needed)|unnecessary|(?:isn['’]t|aren['’]t)\s+(?:required|necessary|needed))/i;
+    // Negation applies to its own clause; a later instruction can still warn.
+    for(const clause of normalized.split(/(?<=[.!?])(?=\s|$)|(?<=[;,])|\n+|\b(?:but|however)\b/i)){
+      let negatedEnd=null;
+      for(const match of clause.matchAll(actions)){
+        const endOfAction=match.index+match[0].length;
+        const coordinatedNegation=negatedEnd!==null&&/^(?:\s+(?:the|this|your|old|previous|existing|mod|version|files|it)){0,5}\s*(?:and(?:\/or)?|or|\/)\s*(?:then\s+)?$/.test(clause.slice(negatedEnd,match.index).toLowerCase());
+        if(negatedBefore.test(clause.slice(0,match.index))||negatedAfter.test(clause.slice(endOfAction))||coordinatedNegation){negatedEnd=endOfAction;continue;}
+        const start=Math.max(0,match.index-60),end=Math.min(clause.length,Math.max(start+240,match.index+match[0].length));
+        return `${start?'…':''}${clause.slice(start,end).trim()}${end<clause.length?'…':''}`;
+      }
+    }
+    return '';
+  }
+  function prepareChangelogs(changelogs){
+    const entries=Array.isArray(changelogs)?changelogs.filter(c=>c&&typeof c==='object').map(c=>[c.version??c.name??'Update',c.changes??c.changelog??c.description??c.text]):Object.entries(changelogs||{});
+    entries.sort((a,b)=>compareChangelogVersions(a[0],b[0]));
+    return entries.map(([version,changes],index)=>({version,listed:Array.isArray(changes),notes:(Array.isArray(changes)?changes:[changes]).map(change=>{
+      const source=change&&typeof change==='object'?change.text??change.description??'':change??'';
+      return {source,instruction:index<3?installationInstruction(changelogText(source)):''};
+    })}));
+  }
+  function renderInstallationWarning(){
+    const entries=detail.changelogEntries.filter(entry=>entry.notes.some(note=>note.instruction));
+    if(!entries.length)return '';
+    return `<aside class="installation-warning" role="status" aria-label="Installation notice">${icon('info')}<div><strong>Check installation instructions</strong><p>Recent changelogs mention a reinstall, clean install, or removal of older files. Checked the latest three versions. Read the author’s instructions before installing.</p><ul>${entries.map(entry=>`<li><b>Version ${esc(entry.version)}</b><span class="installation-warning-note">${esc(entry.notes.find(note=>note.instruction).instruction)}</span></li>`).join('')}</ul><button class="text-button" data-review-installation>Read highlighted changelog ${icon('arrow')}</button></div></aside>`;
+  }
   function renderDetailTab(){
     if(!detail)return;const el=$('#detail-tab-body');if(!el)return;const mod=detail.mod;
     if(detailTab==='overview')el.innerHTML=`${mod.summary?`<p class="detail-summary">${esc(mod.summary)}</p>`:''}<div class="rich-text">${richText(mod.description)||'<p>No description provided. Open the mod on Nexus for more information.</p>'}</div><div style="margin-top:22px"><button class="button small" data-open-mod="true">Open on Nexus ${icon('arrow')}</button><button class="text-button remove-mod-link" data-remove-mod="${esc(modKey(mod))}">Remove from local library</button></div>`;
@@ -751,9 +796,9 @@
       for(const id of filePreviews.keys())renderFilePreview(id);
     }
     if(detailTab==='changelog'){
-      const entries=Array.isArray(detail.changelogs)?detail.changelogs.map(c=>[c.version??c.name??'Update',c.changes??c.changelog??c.description??c.text]):Object.entries(detail.changelogs||{});
-      entries.sort((a,b)=>compareChangelogVersions(a[0],b[0]));
-      el.innerHTML=entries.length?entries.map(([version,changes])=>`<article class="changelog-entry"><h3>Version ${esc(version)}</h3><div class="rich-text">${Array.isArray(changes)?`<ul>${changes.map(c=>`<li>${richText(typeof c==='string'?c:c.text??c.description??'')}</li>`).join('')}</ul>`:richText(changes)}</div></article>`).join(''):'<p class="subtle-empty">The author hasn’t published a changelog through the API. Check the description and the mod page for release notes or pinned instructions.</p><button class="button small" data-open-mod="true">Open on Nexus '+icon('arrow')+'</button>';
+      const entries=detail.changelogEntries;
+      const noteHtml=(note,tag)=>`<${tag}${note.instruction?' class="changelog-installation-note" tabindex="-1"':''}>${richText(note.source)}</${tag}>`;
+      el.innerHTML=entries.length?entries.map(entry=>`<article class="changelog-entry${entry.notes.some(note=>note.instruction)?' changelog-entry-warning':''}"><h3>Version ${esc(entry.version)}</h3><div class="rich-text">${entry.listed?`<ul>${entry.notes.map(note=>noteHtml(note,'li')).join('')}</ul>`:entry.notes.map(note=>noteHtml(note,'div')).join('')}</div></article>`).join(''):'<p class="subtle-empty">The author hasn’t published a changelog through the API. Check the description and the mod page for release notes or pinned instructions.</p><button class="button small" data-open-mod="true">Open on Nexus '+icon('arrow')+'</button>';
     }
     if(detailTab==='requirements'){
       const requirements=Array.isArray(detail.requirements)?detail.requirements:[];
@@ -806,6 +851,7 @@
     if(target.dataset.modKey){showMod(target.dataset.modKey);return;}
     if(target.dataset.filter){filter=target.dataset.filter;$$('[data-filter]').forEach(b=>b.classList.toggle('active',b===target));renderMods();return;}
     if(target.dataset.detailTab){activateDetailTab(target.dataset.detailTab);return;}
+    if(target.hasAttribute('data-review-installation')){activateDetailTab('changelog');const note=$('.changelog-installation-note');note?.focus({preventScroll:true});note?.scrollIntoView({block:'center',inline:'nearest'});return;}
     if(target.dataset.detailRetry){showMod(target.dataset.detailRetry);return;}
     if(target.hasAttribute('data-open-mod')){if(detail)openUrl(modUrl(detail.mod));return;}
     if(target.dataset.openUrl){openUrl(target.dataset.openUrl);return;}

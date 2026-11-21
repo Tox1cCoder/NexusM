@@ -868,6 +868,92 @@
           expect(JSON.stringify([...$('.changelog-entry').querySelectorAll('li')].map(el=>el.textContent))===JSON.stringify(['First author note','Second author note']),'Array release notes must retain their author order.');
         }finally{fakeDetails.changelogs=original;}
       });
+      await check('recent installation instructions stay visible and lead to highlighted author notes',async()=>{
+        const original=fakeDetails.changelogs;
+        try{
+          fakeDetails.changelogs={
+            '7':['Please reinstall the archived version.'],
+            '8':['Please [b]uninstall the previous version[/b] before updating.','A clean install is recommended.','Unrelated author note'],
+            '9':['Routine fixes'],
+            '10':['Latest release']
+          };
+          await window.NexusM.showMod('game1:1');
+          const warning=$('.installation-warning');
+          expect(warning&&warning.getAttribute('role')==='status','Installation advice from the third newest version must appear on Files as an accessible notice.');
+          expect(warning.innerText.includes('8')&&warning.innerText.includes('uninstall the previous version'),'The notice must identify the relevant version and author instruction.');
+          expect(!warning.innerText.includes('archived version'),'The fourth newest version must not contribute an instruction.');
+          expect($$('.installation-warning-note').length===1,'The notice should stay compact with one excerpt per matching version.');
+          expect(warning.compareDocumentPosition($('.detail-tabs'))&Node.DOCUMENT_POSITION_FOLLOWING,'The notice must appear before the detail tabs.');
+          for(const tab of ['overview','requirements','files']){
+            $(`[data-detail-tab="${tab}"]`).click();
+            expect($('.installation-warning')===warning&&warning.getClientRects().length,'Switching tabs must keep the installation notice available.');
+          }
+          $('[data-select-file="10"]').click();
+          $('[data-review-installation]').click();
+          expect($('[data-detail-tab="changelog"]').getAttribute('aria-selected')==='true','Reviewing installation advice must open Changelog.');
+          const instruction=$('.changelog-installation-note');
+          expect(instruction&&instruction.tabIndex===-1&&document.activeElement===instruction,'Reviewing the advice must focus the first highlighted instruction.');
+          expect(instruction.querySelector('strong')?.textContent==='uninstall the previous version','Highlighting must retain author formatting.');
+          expect($$('.changelog-entry-warning').length===1&&$$('.changelog-installation-note').length===2,'All matching recent notes should be highlighted, including those without a banner excerpt.');
+          $('[data-detail-tab="files"]').click();
+          expect($('[data-select-file="10"]').checked,'Reviewing installation advice must preserve selected downloads.');
+        }finally{fakeDetails.changelogs=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('installation detection reads rendered author text across changelog formats',async()=>{
+        const original=fakeDetails.changelogs;
+        try{
+          const cases=[
+            'Please reinstall before updating.',
+            '<p>A RE-<strong>INSTALL</strong> is required.</p>',
+            '[b]Clean install required[/b]',
+            'Perform a fresh installation.',
+            'Remove the old version before installing this update.',
+            'Delete all previous files before updating.',
+            '<p>Remove the<br>old version before installing.</p>',
+            '<p>A clean<br>installation is recommended.</p>',
+            'Delete the old .pak before installing the new one.',
+            'Please re‑install before updating.',
+            'Do not forget to reinstall.',
+            'No need to uninstall, but reinstall for the new settings.',
+            '<p>Please un<b>install</b><br>the previous version.</p>',
+            'Please re&#105;nstall before upgrading.'
+          ];
+          for(const note of cases){
+            fakeDetails.changelogs=[{version:'1.9',changes:['Older release']},{name:'2.0',changelog:[{description:note}]}];
+            await window.NexusM.showMod('game1:1');
+            expect($('.installation-warning-note'),`Missing installation notice for ${note}`);
+          }
+          fakeDetails.changelogs=[{version:'3.0',text:'Reinstall &lt;archive&gt; &amp; keep &quot;settings&quot;.<script>window.__uiInjected=true</script>'}];
+          await window.NexusM.showMod('game1:1');
+          const excerpt=$('.installation-warning-note');
+          expect(excerpt?.textContent.includes('Reinstall <archive> & keep "settings".'),'Warning excerpts must preserve decoded author text.');
+          expect(!excerpt.querySelector('archive,script,strong,a,img')&&!window.__uiInjected,'Warning excerpts must be inert text.');
+        }finally{fakeDetails.changelogs=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('routine, negated and unavailable changelogs clear installation warnings',async()=>{
+        const original=fakeDetails.changelogs;
+        try{
+          fakeDetails.changelogs={'2.0':['Reinstall required.']};
+          await window.NexusM.showMod('game1:1');
+          expect($('.installation-warning'),'The initial installation warning must be present.');
+          const ordinary=[
+            'No need to reinstall. Reinstall is not required. Do not uninstall the old version.',
+            'No need to uninstall and reinstall the mod. Do not uninstall or reinstall. No uninstall/reinstall required.',
+            'Reinstallation is no longer required. Reinstalling the mod is unnecessary. Instead of reinstalling, use the updater.',
+            'Updated installer and uninstaller support. Delete the cache if needed.',
+            '<a href="https://example.com/reinstall">Release guide</a><img alt="uninstall" src="https://example.com/uninstall.png"><script>reinstall();</script>'
+          ];
+          fakeDetails.changelogs={'3.0':ordinary,'2.0':['Routine fixes'],'1.0':['Other fixes'],'0.9':['Reinstall the old release.']};
+          await window.NexusM.showMod('game1:2');
+          expect(!$('.installation-warning'),'Opening another mod must remove stale warnings and ignore negations, attributes and older releases.');
+          $('[data-detail-tab="changelog"]').click();
+          expect(!$('.changelog-installation-note')&&!$('.changelog-entry-warning'),'Ordinary notes must not receive installation highlighting.');
+          for(const logs of [{},[],null]){
+            fakeDetails.changelogs=logs;await window.NexusM.showMod('game1:1');
+            expect(!$('.installation-warning'),'Missing changelogs must not create an installation warning.');
+          }
+        }finally{fakeDetails.changelogs=original;await window.NexusM.showMod('game1:1');}
+      });
       await check('requirement content renders',()=>{
         $('[data-detail-tab="requirements"]').click();expect($('#detail-tab-body').innerText.includes('Required framework'),'Requirement missing.');
       });
