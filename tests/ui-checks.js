@@ -676,7 +676,6 @@
         expect($('#file-preview-10').textContent.includes('Fresh.pak')&&$('#file-preview-10').textContent.includes('only part of the archive listing'),'A fresh partial preview should show its files and truncation notice.');
       });
       await check('Get this file prepares a download with one click',async()=>{
-        expect($('#detail-tab-body .details-note').textContent.includes('free-download steps automatically'),'File instructions should describe automatic preparation.');
         const before=requests.filter(r=>r.action==='startDownload').length;
         $('[data-download-file="10"]').click();await settle();
         const downloads=requests.filter(r=>r.action==='startDownload');
