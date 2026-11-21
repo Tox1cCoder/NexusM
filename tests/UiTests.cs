@@ -75,7 +75,9 @@ namespace NexusM
                 {
                     if (!disposing) RecordBrowserEvent(e.ProcessFailedKind.ToString(), e.Reason + " (exit 0x" + e.ExitCode.ToString("X8") + "): " + e.ProcessDescription + " " + e.FailureSourceModulePath);
                 };
-                browser.CoreWebView2.SetVirtualHostNameToFolderMapping("nexusm.local", Path.Combine(workspace, "ui"), CoreWebView2HostResourceAccessKind.DenyCors);
+                // Exercise the shipped HTML, script, and styles together. Source-only
+                // checks miss stale or partially refreshed files in the app folder.
+                browser.CoreWebView2.SetVirtualHostNameToFolderMapping("nexusm.local", Path.Combine(workspace, "dist", "ui"), CoreWebView2HostResourceAccessKind.DenyCors);
                 browser.CoreWebView2.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
                 browser.CoreWebView2.WebResourceRequested += delegate(object sender, CoreWebView2WebResourceRequestedEventArgs e)
                 {
@@ -115,7 +117,7 @@ namespace NexusM
                     if (Data.Str(result, "status") == "complete") break;
                 }
                 checks = Data.List(Data.Get(result, "checks"));
-                checks.Insert(0, Data.Obj("test", "UI readiness precedes saved-library and account work", "passed", true));
+                checks.Insert(0, Data.Obj("test", "Packaged UI readiness precedes saved-library and account work", "passed", true));
                 await Eval("document.querySelector('.toasts').replaceChildren()");
                 foreach (int width in new[] { 980, 1060, 1070, 1100, 1120, 1340, 1370, 1380, 1600 })
                 {
