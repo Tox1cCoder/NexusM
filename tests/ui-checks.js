@@ -758,6 +758,44 @@
           }
         }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
       });
+      await check('YouTube BBCode renders ordered video cards and opens the selected video in the browser',async()=>{
+        const original=fakeDetails.mod.description,ids=['EofKulp2jJs','l2Vvj-tsRMw','hxuzu2kMVoI'];
+        const sample=`[youtube]${ids[0]}[/youtube][youtube]${ids[1]}[/youtube]\n\n[youtube]${ids[2]}[/youtube]`;
+        try{
+          for(const description of [sample,`<p>Before [b]the videos[/b]</p><div>${sample}</div><p>After the videos</p>`]){
+            fakeDetails.mod.description=description;await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+            const content=$('#detail-tab-body .rich-text'),videos=[...content.querySelectorAll('a.youtube-video')];
+            expect(JSON.stringify(videos.map(video=>video.href))===JSON.stringify(ids.map(id=>`https://www.youtube.com/watch?v=${id}`)),'Adjacent and separated video tags must render in their author order.');
+            expect(videos.every((video,index)=>video.getAttribute('data-external')==='true'&&video.getAttribute('aria-label')?.includes(ids[index])&&video.textContent.includes('Watch on YouTube')),'Each video must have an accessible external-browser action.');
+            expect(videos.every((video,index)=>video.querySelector('img')?.src===`https://i.ytimg.com/vi/${ids[index]}/hqdefault.jpg`),'Video cards must use the thumbnail for their exact video ID.');
+            expect(!content.querySelector('iframe')&&!/\[\/?youtube[^\]]*\]/i.test(content.textContent),'Supported video tags must not remain as raw BBCode or create embedded frames.');
+            if(description!==sample)expect(content.querySelector('p strong')?.textContent==='the videos'&&content.textContent.includes('After the videos'),'Video rendering must preserve surrounding author content.');
+          }
+          const before=requests.filter(request=>request.action==='openUrl').length;
+          $$('.youtube-video')[1].click();await settle();
+          const opened=requests.filter(request=>request.action==='openUrl');
+          expect(opened.length===before+1&&opened.at(-1).payload.url===`https://www.youtube.com/watch?v=${ids[1]}`,'Selecting a video must open exactly that canonical URL through the host browser action.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
+      await check('YouTube URLs normalize safely while invalid payloads and code samples stay inert',async()=>{
+        const original=fakeDetails.mod.description,id='EofKulp2jJs';
+        try{
+          const urls=[`https://www.youtube.com/watch?v=${id}&t=15`,`https://m.youtube.com/watch?v=${id}`,`https://youtu.be/${id}?t=15`,`https://youtube.com/embed/${id}`,`https://www.youtube.com/shorts/${id}`,`https://www.youtube.com/live/${id}`];
+          fakeDetails.mod.description=urls.map(url=>`[youtube]${url}[/youtube]`).join('\n');
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const videos=$$('.youtube-video');
+          expect(videos.length===urls.length&&videos.every(video=>video.href===`https://www.youtube.com/watch?v=${id}`),'Known YouTube URL forms must normalize to the same video link.');
+          const invalid=['short','EofKulp2jJs-extra',`javascript:alert('${id}')`,`data:text/html,${id}`,`https://youtube.com.evil.example/watch?v=${id}`,`https://youtube.com@evil.example/watch?v=${id}`,`https://user:secret@www.youtube.com/watch?v=${id}`,`${id}" onclick="window.__uiInjected=true`];
+          fakeDetails.mod.description=invalid.map(value=>`[youtube]${value}[/youtube]`).join('\n')+`[youtube=${id}" onclick="window.__uiInjected=true][/youtube]`;
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          expect(!$('.youtube-video')&&!$('#detail-tab-body').querySelector('[onclick],[onerror],iframe,script')&&!window.__uiInjected,'Malformed IDs, unsafe URLs and injected attributes must not create video controls or executable markup.');
+          const literal=`[youtube]${id}[/youtube]`;
+          fakeDetails.mod.description=`[code]${literal}[/code]<code>${literal}</code><pre>${literal}</pre>`;
+          await window.NexusM.showMod('game1:1');$('[data-detail-tab="overview"]').click();
+          const samples=$$('#detail-tab-body pre,#detail-tab-body code');
+          expect(samples.length>=3&&samples.every(sample=>sample.textContent===literal)&&!$('.youtube-video'),'BBCode and HTML code samples must preserve literal YouTube tags.');
+        }finally{fakeDetails.mod.description=original;await window.NexusM.showMod('game1:1');}
+      });
       await check('nested BBCode keeps lists, quotes, spoilers and literal code examples readable',async()=>{
         const original=fakeDetails.mod.description;
         try{

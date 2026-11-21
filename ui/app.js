@@ -522,6 +522,18 @@
 
   // Nexus descriptions can mix HTML and BBCode. Parse both, then rebuild only
   // readable markup; author-supplied attributes never go straight into the UI.
+  function youtubeVideoId(value){
+    const valid=id=>/^[A-Za-z0-9_-]{11}$/.test(id||'')?id:'';
+    const text=String(value).trim();if(valid(text))return text;
+    try{
+      const url=new URL(text);if(!['http:','https:'].includes(url.protocol)||url.username||url.password)return '';
+      const host=url.hostname.toLowerCase();
+      if(['youtu.be','www.youtu.be'].includes(host))return valid(url.pathname.slice(1));
+      if(!['youtube.com','www.youtube.com','m.youtube.com'].includes(host))return '';
+      if(url.pathname==='/watch')return valid(url.searchParams.get('v'));
+      const path=url.pathname.match(/^\/(?:embed|shorts|live)\/([A-Za-z0-9_-]{11})\/?$/);return path?path[1]:'';
+    }catch{return '';}
+  }
   function richText(source){
     if(!source)return '';
     const text=String(source).replace(/\r\n?/g,'\n');
@@ -529,7 +541,7 @@
     const root={tag:'',children:[]},stack=[root];
     // HTML tokens are opaque here, so BBCode-looking attribute values and code
     // examples are left intact for the sanitizer below.
-    const tokens=/<pre\b[^>]*>[\s\S]*?<\/pre\s*>|<code\b[^>]*>[\s\S]*?<\/code\s*>|<!--[\s\S]*?-->|<(?:[^<>"']|"[^"]*"|'[^']*')+>|\[code(?:=[^\]\n]*)?\]([\s\S]*?)\[\/code\]|\[(\/)?(b|i|u|s|strike|url|img|quote|list|size|color|font|center|left|right|spoiler|\*)(?:=([^\]\n]*))?\]/gi;
+    const tokens=/<pre\b[^>]*>[\s\S]*?<\/pre\s*>|<code\b[^>]*>[\s\S]*?<\/code\s*>|<!--[\s\S]*?-->|<(?:[^<>"']|"[^"]*"|'[^']*')+>|\[code(?:=[^\]\n]*)?\]([\s\S]*?)\[\/code\]|\[(\/)?(b|i|u|s|strike|url|img|youtube|quote|list|size|color|font|center|left|right|spoiler|\*)(?:=([^\]\n]*))?\]/gi;
     const append=value=>stack[stack.length-1].children.push(value);
     const unquote=value=>{
       const decoded=document.createElement('textarea');decoded.innerHTML=String(value??'').replace(/</g,'&lt;');
@@ -571,6 +583,10 @@
       if(node.tag==='code')return `<pre><code>${body}</code></pre>`;
       if(node.tag==='list')return `<${node.arg?'ol':'ul'}>${body}</${node.arg?'ol':'ul'}>`;
       if(node.tag==='spoiler')return `<details><summary>${esc(node.arg||'Show spoiler')}</summary>${body}</details>`;
+      if(node.tag==='youtube'){
+        const id=youtubeVideoId(node.arg||new DOMParser().parseFromString(body,'text/html').body.textContent);
+        return id?`<a class="youtube-video" href="https://www.youtube.com/watch?v=${id}"><img src="https://i.ytimg.com/vi/${id}/hqdefault.jpg" alt=""><span>▶ Watch on YouTube</span></a>`:body;
+      }
       if(node.tag==='url'||node.tag==='img'){
         const value=node.arg||new DOMParser().parseFromString(node.children.filter(child=>typeof child==='string').join(''),'text/html').body.textContent.trim();
         return node.tag==='url'?`<a href="${esc(value)}">${body}</a>`:`<img src="${esc(value)}" alt="Mod image">`;
@@ -596,8 +612,15 @@
         if(sizes.includes(size))out.style.fontSize=size;
         if(['left','center','right'].includes(align))out.style.textAlign=align;
       }
-      if(node.tagName==='A'){const url=imageUrl(node.getAttribute('href'));if(url){out.setAttribute('href',url);out.setAttribute('data-external','true');}}
-      if(node.tagName==='IMG'){const url=imageUrl(node.getAttribute('src'));if(!url)return document.createTextNode('');out.setAttribute('src',url);out.setAttribute('alt',node.getAttribute('alt')||'Mod image');out.setAttribute('loading','lazy');out.setAttribute('referrerpolicy','no-referrer');}
+      if(node.tagName==='A'){
+        const url=imageUrl(node.getAttribute('href'));if(url){
+          out.setAttribute('href',url);out.setAttribute('data-external','true');
+          if(node.classList.contains('youtube-video')&&/^https:\/\/www\.youtube\.com\/watch\?v=[A-Za-z0-9_-]{11}$/.test(url)){
+            out.className='youtube-video';out.setAttribute('aria-label',`Watch YouTube video ${youtubeVideoId(url)} in your browser`);
+          }
+        }
+      }
+      if(node.tagName==='IMG'){const url=imageUrl(node.getAttribute('src'));if(!url)return document.createTextNode('');out.setAttribute('src',url);out.setAttribute('alt',node.getAttribute('alt')??'Mod image');out.setAttribute('loading','lazy');out.setAttribute('referrerpolicy','no-referrer');}
       if(['TD','TH'].includes(node.tagName)){
         for(const attribute of ['colspan','rowspan']){const span=Number(node.getAttribute(attribute));if(Number.isInteger(span)&&span>=1&&span<=100)out.setAttribute(attribute,String(span));}
         const scope=node.getAttribute('scope');if(node.tagName==='TH'&&['row','col','rowgroup','colgroup'].includes(scope))out.setAttribute('scope',scope);

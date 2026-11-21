@@ -226,6 +226,10 @@ select{appearance:auto;background:#25282e;border:1px solid #363941;color:#aeb4c0
 .rich-text img{max-width:100%;height:auto;border-radius:4px}
 .rich-text a{color:#e2a579;text-decoration:none}
 .rich-text a:hover{text-decoration:underline}
+.rich-text a.youtube-video{display:inline-flex;vertical-align:top;flex-direction:column;width:240px;max-width:100%;margin:8px 12px 8px 0;border:1px solid #46505d;border-radius:6px;overflow:hidden;background:#252a31;color:#e7c09c;text-align:left;text-decoration:none}
+.rich-text a.youtube-video:hover{border-color:#c68c58;background:#2d3037}
+.rich-text .youtube-video img{display:block;width:100%;max-height:20vh;aspect-ratio:16/9;object-fit:cover;border-radius:0}
+.rich-text .youtube-video span{padding:8px 11px}
 .rich-text p{margin:8px 0}
 .rich-text ul,.rich-text ol{padding-left:20px}
 .rich-text h1,.rich-text h2,.rich-text h3,.rich-text h4{font-size:14px;font-weight:600;margin:16px 0 8px}

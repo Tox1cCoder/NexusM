@@ -9,7 +9,7 @@
   const longText = 'An unusually long title with several edition and compatibility notes '.repeat(4);
   const mod = {gameDomain:'layoutgame',modId:1,name:longText,author:longWord,version:longWord,updatedAt:1792450000,lastDownloadedAt:1792300000,needsReview:true};
   const details = {
-    mod:{...mod,summary:longText,description:`<p>${longText}</p><table><tr><th>File</th><th>Installation instructions</th></tr><tr><td>${longWord}</td><td>${longText}</td></tr></table><pre><code>${longWord.repeat(4)}</code></pre>`},
+    mod:{...mod,summary:longText,description:`<p>${longText}</p>[youtube]EofKulp2jJs[/youtube][youtube]l2Vvj-tsRMw[/youtube]<table><tr><th>File</th><th>Installation instructions</th></tr><tr><td>${longWord}</td><td>${longText}</td></tr></table><pre><code>${longWord.repeat(4)}</code></pre>`},
     files:[{fileId:10,name:longWord,category:'MAIN',version:longWord,size:4096,uploadedAt:1792450000,description:longText}],
     changelogs:{[longWord]:[`Reinstall required. ${longWord} ${longText}`]},
     requirements:[{name:longWord,notes:longText,url:'https://www.nexusmods.com/layoutgame/mods/2'}]
@@ -219,6 +219,9 @@
           if(tab==='changelog')fit($('.changelog-installation-note'),'Highlighted installation instruction');
           if(tab==='overview'){
             if(!$('.rich-text table')||!$('.rich-text pre'))fail('Wide author content must be preserved.');
+            const videos=$$('.rich-text .youtube-video');
+            if(videos.length!==2)fail('Both adjacent author videos must remain available.');
+            for(const video of videos){fit(video,'YouTube video card');reach(video,video.getAttribute('aria-label'),panel);}
             for(const element of $$('.rich-text table,.rich-text pre')){
               fit(element,element.tagName==='TABLE'?'Author table':'Author code sample');
               if(element.tabIndex!==0)fail('Author content must remain keyboard accessible.');
