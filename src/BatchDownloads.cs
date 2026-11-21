@@ -51,15 +51,15 @@ namespace NexusM
                 if (!(rawFiles is object[]) && !(rawFiles is IList)) throw new NexusApiException("Nexus returned an unreadable file list. Try again.", 502);
                 var files = Data.List(rawFiles);
                 var mainFiles = files.Where(file => BatchFileCategory(file) == "MAIN").ToList();
-                if (FindMod(domain, modId) == null) result["reason"] = "This mod is no longer in your library.";
-                else if (files.Any(file => BatchFileCategory(file) == "OPTIONAL")) result["reason"] = "This mod has optional files. Open it to choose your files.";
-                else if (mainFiles.Count != 1) result["reason"] = mainFiles.Count == 0 ? "This mod has no main file. Open it to choose your files." : "This mod has multiple main files. Open it to choose your files.";
+                if (FindMod(domain, modId) == null) result["reason"] = "No longer in your library";
+                else if (files.Any(file => BatchFileCategory(file) == "OPTIONAL")) result["reason"] = "Optional files · open to choose";
+                else if (mainFiles.Count != 1) result["reason"] = mainFiles.Count == 0 ? "No main file · open to choose" : "Multiple main files · open to choose";
                 else if (Data.Num(mainFiles[0], "file_id") <= 0) throw new NexusApiException("Nexus returned an invalid main file. Try again.", 502);
                 else {
                     var file = mainFiles[0]; long fileId = Data.Num(file, "file_id");
                     result["fileId"] = fileId; result["name"] = Data.Str(file, "name");
                     if (DownloadAuthorizationPending(domain + ":" + modId + ":" + fileId)) {
-                        result["status"] = "alreadyQueued"; result["reason"] = "This file is already being prepared or downloaded.";
+                        result["status"] = "alreadyQueued"; result["reason"] = "In download queue";
                     }
                     else { result["eligible"] = true; result["status"] = "eligible"; result["file"] = file; result["fileResponse"] = response; }
                 }
@@ -114,7 +114,7 @@ namespace NexusM
                         bool added = QueueDownloadAuthorization(Data.Str(candidate, "gameDomain"), Data.Num(candidate, "modId"), Data.Num(candidate, "fileId"), file, authorize);
                         candidate["status"] = added ? "queued" : "alreadyQueued";
                         if (added) queued++;
-                        else candidate["reason"] = "This file is already being prepared or downloaded.";
+                        else candidate["reason"] = "In download queue";
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception error) { candidate["status"] = "failed"; candidate["reason"] = error.Message; }

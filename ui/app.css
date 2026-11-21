@@ -438,7 +438,10 @@ main{margin-left:70px;padding:27px 22px}
 .mod-select-cell input:disabled{cursor:default}
 .mod-select-cell input[aria-busy="true"]{opacity:.55}
 .mods-table tbody tr.selected-for-download{background:#30291f}
-.mod-cell .batch-mod-status{color:#c2aa8f;white-space:normal;overflow-wrap:anywhere;max-width:100%;line-height:1.5;font-size:9px;margin-top:5px}
+.mod-cell .batch-mod-status{display:block;width:fit-content;max-width:100%;margin-top:6px;padding:1px 6px;border:1px solid #3d424b;border-radius:4px;background:#262a31;color:#9aa3b0;white-space:normal;overflow-wrap:anywhere;line-height:1.5;font-size:9px}
+.mod-cell .batch-mod-status[data-tone="choice"]{color:#ecc76f;background:#322d1d;border-color:#5c4f2a}
+.mod-cell .batch-mod-status[data-tone="queued"]{color:#8fc0f2;background:#1e2b3b;border-color:#2f4a68}
+.mod-cell .batch-mod-status[data-tone="failed"]{color:#f29c9c;background:#3a2226;border-color:#643239}
 @media(max-width:1100px){.batch-selection{align-items:flex-start;flex-direction:column;gap:10px}
 .batch-selection-actions{align-self:flex-end}
 .mods-table th.mod-select-cell,.mods-table td.mod-select-cell{padding:0 6px;width:56px}

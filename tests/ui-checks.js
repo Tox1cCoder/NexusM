@@ -201,12 +201,21 @@
       });
       await check('mods with file choices are disabled while failed file checks remain retryable',async()=>{
         const choices=$('[data-select-mod="game1:2"]');choices.click();
-        replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:2,eligible:false,status:'ineligible',reason:'This mod has optional files. Open it to choose files.'});await settle();
-        expect(!choices.checked&&choices.disabled&&choices.closest('tr').textContent.includes('optional files'),'Optional files must leave the mod unselected and explain why.');
+        replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:2,eligible:false,status:'ineligible',reason:'Optional files · open to choose'});await settle();
+        const choiceStatus=choices.closest('tr').querySelector('.batch-mod-status');
+        expect(!choices.checked&&choices.disabled&&choiceStatus.textContent==='Optional files · open to choose'&&choiceStatus.dataset.tone==='choice','Optional files must leave the mod unselected and explain why.');
         const before=requests.length;
         choices.closest('label').click();await settle();
         expect(!choices.checked&&requests.length===before&&$('#detail-panel').classList.contains('hidden'),'Clicking the enlarged disabled target must neither select nor open the mod.');
-        expect(choices.closest('label').title.includes('optional files'),'The whole disabled target must explain why this mod cannot be selected.');
+        expect(choices.closest('label').title.includes('Optional files'),'The whole disabled target must explain why this mod cannot be selected.');
+        const choiceColor=getComputedStyle(choiceStatus).color;
+        window.NexusM.setState({downloads:[...fixture.downloads,{id:'game1:2:21',gameDomain:'game1',modId:2,fileId:21,name:'Optional patch',status:'waiting-authorization'}]});
+        expect(choiceStatus.textContent==='In download queue'&&choiceStatus.dataset.tone==='queued'&&choices.closest('label').title==='In download queue','A file queued from the mod details must update its library row live.');
+        expect(getComputedStyle(choiceStatus).color!==choiceColor,'Queued rows must use a different color from file-choice rows.');
+        window.NexusM.setState({downloads:[...fixture.downloads,{id:'game1:2:21',gameDomain:'game1',modId:2,fileId:21,name:'Optional patch',status:'downloading',bytes:1,total:4}]});
+        expect(choiceStatus.textContent==='In download queue','Active downloads must keep the queued status.');
+        window.NexusM.setState({downloads:[...fixture.downloads,{id:'game1:2:21',gameDomain:'game1',modId:2,fileId:21,name:'Optional patch',status:'completed'}]});
+        expect(choiceStatus.textContent==='Optional files · open to choose'&&choiceStatus.dataset.tone==='choice'&&choices.disabled,'Finished downloads must restore the file-choice explanation.');
         const retry=$('[data-select-mod="game2:3"]');retry.click();
         replyCandidate([...batchCandidateRequests.values()].pop(),null,'Nexus is temporarily unavailable.');await settle();
         expect(!retry.checked&&!retry.disabled,'A failed API call must allow another selection attempt.');
@@ -243,8 +252,8 @@
         const input=$('[data-select-mod="game1:1"]');input.click();
         replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:1,eligible:true,status:'eligible',fileId:101});await settle();
         $('#download-selected-mods').click();
-        window.NexusM.receive({id:batchDownloadRequest.id,ok:true,result:{state:{downloads:fixture.downloads},batch:{queued:0,skipped:1,failed:0,candidates:[{gameDomain:'game1',modId:1,eligible:false,status:'ineligible',reason:'This mod now has multiple main files. Open it to choose files.'}]}}});batchDownloadRequest=null;await settle();
-        expect(!input.checked&&input.disabled&&input.closest('tr').textContent.includes('multiple main files'),'Fresh validation should stop a changed mod from downloading the wrong file.');
+        window.NexusM.receive({id:batchDownloadRequest.id,ok:true,result:{state:{downloads:fixture.downloads},batch:{queued:0,skipped:1,failed:0,candidates:[{gameDomain:'game1',modId:1,eligible:false,status:'ineligible',reason:'Multiple main files · open to choose'}]}}});batchDownloadRequest=null;await settle();
+        expect(!input.checked&&input.disabled&&input.closest('tr').textContent.includes('Multiple main files'),'Fresh validation should stop a changed mod from downloading the wrong file.');
       });
       await check('metadata changes and cancelled checks cannot restore stale batch selections',async()=>{
         window.NexusM.setState({mods:fixture.mods.map(mod=>mod.modId===1?{...mod,version:'2.1'}:mod)});

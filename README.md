@@ -64,7 +64,7 @@ Downloading a linked newer file also checks for older retained archives, includi
 
 If the author has not identified a single replacement, NexusM can notify you when the mod reports a changed version and offers **Review files** so you can choose. It does not guess which optional file or variant replaces your archive. Only archives that still match their saved file identity are eligible; renamed, moved, or externally changed files are left alone. Clearing the Downloads list stops these archive notifications.
 
-For mods with exactly one main file and no optional files, use the checkboxes in **My library**, then **Download selected** to queue up to 100 mods together. Checking a box verifies that mod's current files without opening its details. Mods with file choices explain why they cannot be selected; open their details to choose files. Selections stay when you search or switch games, and **Clear selection** removes them.
+For mods with exactly one main file and no optional files, use the checkboxes in **My library**, then **Download selected** to queue up to 100 mods together. Checking a box verifies that mod's current files without opening its details. Mods with file choices show a short amber tag explaining why they cannot be selected; open their details to choose files. Once one of their files is queued, the tag turns blue and reads **In download queue** until the download finishes. Selections stay when you search or switch games, and **Clear selection** removes them.
 
 With mods selected, a floating **Download selected** button appears when you scroll past the selection bar, so you can start their downloads without scrolling back up.
 

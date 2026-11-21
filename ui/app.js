@@ -175,14 +175,19 @@
     $('#clear-mod-selection').disabled=preparingBatch||(!selectedMods.size&&!checking);
     $('#batch-selection').classList.toggle('hidden',state.mods.length===0);
     let visibleSelected=0;
+    // Downloads started from a mod's Files tab update its checked row live.
+    const queuedMods=new Set(state.downloads.filter(download=>queuedStatuses.has(download.status)).map(modKey));
     for(const input of $$('[data-select-mod]')){
       const key=input.dataset.selectMod,candidate=batchCandidates.get(key),pendingCheck=candidate?.status==='checking';
       const checked=selectedMods.has(key)||pendingCheck,disabled=preparingBatch||clearing||pendingCheck||['ineligible','alreadyQueued'].includes(candidate?.status);
       if(input.checked!==checked)input.checked=checked;if(input.disabled!==disabled)input.disabled=disabled;
       input.setAttribute('aria-busy',String(pendingCheck));
       const row=input.closest('tr');row.classList.toggle('selected-for-download',selectedMods.has(key));
-      const message=pendingCheck?'Checking files…':['ineligible','failed','alreadyQueued'].includes(candidate?.status)?candidate.reason||(candidate.status==='alreadyQueued'?'This file is already in the download queue.':'Open this mod to choose its files.') :'';
+      const queued=!!candidate&&!pendingCheck&&(candidate.status==='alreadyQueued'||queuedMods.has(key));
+      const tone=pendingCheck?'checking':queued?'queued':candidate?.status==='ineligible'?'choice':candidate?.status==='failed'?'failed':'';
+      const message=pendingCheck?'Checking files…':queued?'In download queue':tone?candidate.reason||'Open to choose files':'';
       const status=$('.batch-mod-status',row);if(status.textContent!==message)status.textContent=message;status.classList.toggle('hidden',!message);
+      if(status.dataset.tone!==tone)status.dataset.tone=tone;
       const title=message||(candidate?.eligible?`Download ${candidate.name||'the main file'}`:'Check files and select this mod for download');
       if(input.title!==title)input.title=title;
       const target=input.closest('label');if(target.title!==title)target.title=title;
