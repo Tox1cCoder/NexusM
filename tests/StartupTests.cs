@@ -58,6 +58,13 @@ namespace NexusM
             File.WriteAllText(report, Data.Json.Serialize(Data.Obj("running", true, "checks", checks)), new UTF8Encoding(false));
         }
         private static void Expect(bool condition, string error) { if (!condition) throw new InvalidOperationException(error); }
+        private static double Contrast(Color foreground, Color background)
+        {
+            Func<byte, double> linear = value => { double channel = value / 255.0; return channel <= 0.04045 ? channel / 12.92 : Math.Pow((channel + 0.055) / 1.055, 2.4); };
+            Func<Color, double> luminance = color => 0.2126 * linear(color.R) + 0.7152 * linear(color.G) + 0.0722 * linear(color.B);
+            double first = luminance(foreground), second = luminance(background);
+            return (Math.Max(first, second) + 0.05) / (Math.Min(first, second) + 0.05);
+        }
         private static async Task Until(Func<bool> complete, int milliseconds = 12000)
         {
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(milliseconds);
@@ -103,7 +110,11 @@ namespace NexusM
                 var controller = fixture.Form.Controller; fixture.Show();
                 await Until(delegate { return fixture.Form.StartupFailure == "ui-files-missing"; });
                 Expect(fixture.Form.StartupFallbackVisible && !fixture.Form.InterfaceReady, "Missing files left an empty window rather than native retry.");
-                File.WriteAllText(fixture.Page, ReadyPage); await fixture.Form.RetryInterface();
+                var retry = (Button)typeof(MainForm).GetField("retryInterface", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(fixture.Form);
+                Expect(retry.Visible && retry.Enabled && retry.TabStop && retry.CanSelect && retry.Text.Replace("&", "").Trim() == "Retry", "Native retry must have a visible label and remain reachable by keyboard.");
+                foreach (Color background in new[] { retry.BackColor, retry.FlatAppearance.MouseOverBackColor, retry.FlatAppearance.MouseDownBackColor })
+                    Expect(Contrast(retry.ForeColor, background) >= 4.5, "Native retry text must remain readable in its normal, hover, and pressed states.");
+                File.WriteAllText(fixture.Page, ReadyPage); retry.PerformClick();
                 await Until(delegate { return fixture.Form.InterfaceReady; });
                 Expect(!fixture.Form.StartupFallbackVisible && ReferenceEquals(controller, fixture.Form.Controller) && fixture.Store.Mods.Count == 1 && Data.Num(fixture.Store.Mods[0], "lastDownloadedAt") == 12345, "Retry replaced the controller or lost the saved library.");
             }

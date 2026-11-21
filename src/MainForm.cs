@@ -70,6 +70,10 @@ namespace NexusM
             startupTitle.AutoSize = true; startupTitle.ForeColor = Color.White; startupTitle.Font = new Font("Segoe UI", 19F); startupTitle.Text = "Opening NexusM...";
             startupMessage.AutoSize = true; startupMessage.MaximumSize = new Size(540, 0); startupMessage.ForeColor = Color.FromArgb(175, 180, 190); startupMessage.Font = new Font("Segoe UI", 10F); startupMessage.Margin = new Padding(0, 12, 0, 20); startupMessage.Text = "Loading your window. Your saved library will appear shortly.";
             retryInterface.Text = "Retry"; retryInterface.Width = 140; retryInterface.Height = 36; retryInterface.Font = new Font("Segoe UI", 10F); retryInterface.Visible = false;
+            retryInterface.FlatStyle = FlatStyle.Flat; retryInterface.UseVisualStyleBackColor = false; retryInterface.Cursor = Cursors.Hand;
+            retryInterface.ForeColor = Color.FromArgb(24, 24, 28); retryInterface.BackColor = Color.FromArgb(255, 150, 63);
+            retryInterface.FlatAppearance.BorderSize = 1; retryInterface.FlatAppearance.BorderColor = Color.FromArgb(255, 190, 137);
+            retryInterface.FlatAppearance.MouseOverBackColor = Color.FromArgb(255, 171, 101); retryInterface.FlatAppearance.MouseDownBackColor = Color.FromArgb(230, 124, 38);
             retryInterface.Click += async delegate { await RetryInterface(); };
             contents.Controls.Add(startupTitle); contents.Controls.Add(startupMessage); contents.Controls.Add(retryInterface); startupPanel.Controls.Add(contents);
             startupPanel.Resize += delegate { contents.Left = Math.Max(20, (startupPanel.ClientSize.Width - contents.Width) / 2); contents.Top = Math.Max(20, (startupPanel.ClientSize.Height - contents.Height) / 2); };
