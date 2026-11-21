@@ -237,15 +237,11 @@ select{appearance:auto;background:#25282e;border:1px solid #363941;color:#aeb4c0
 .rich-text blockquote{border-left:2px solid #80603d;padding:7px 12px;margin:12px 0;background:#28272a}
 .details-note{display:flex;gap:9px;background:#292920;border:1px solid #444333;padding:11px 12px;border-radius:5px;font-size:10px;line-height:1.7;color:#b1ac91;margin-bottom:20px}
 .details-note svg{width:15px;height:15px;margin-top:2px}
-.installation-warning{display:flex;align-items:flex-start;gap:10px;margin:0 27px 20px;padding:14px;border:1px solid #96733d;border-radius:6px;background:#342c20;color:#e8c58f;font-size:11px;line-height:1.7}
-.installation-warning>svg{color:#ffc878;margin-top:2px}
-.installation-warning>div{min-width:0}
-.installation-warning strong{color:#ffe0ab;font-size:12px}
-.installation-warning p{margin:5px 0 8px}
-.installation-warning ul{margin:0 0 6px;padding-left:17px}
-.installation-warning li{margin:7px 0}
-.installation-warning-note{display:block;color:#e2d3bd}
-.installation-warning .text-button{max-width:100%;white-space:normal;text-align:left;color:#ffd190}
+.installation-tag{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%;padding:3px 8px;border:1px solid #96733d;border-radius:4px;background:#342c20;color:#ffd190;font-size:10px;line-height:1.5;text-align:left;overflow-wrap:anywhere}
+.installation-tag:hover{background:#40341f;border-color:#d9a45d;color:#ffe0ab}
+.installation-tag:focus-visible{outline:2px solid var(--orange);outline-offset:2px}
+.installation-tag svg{flex:none;width:12px;height:12px;color:#ffc878}
+.installation-tag span{min-width:0}
 .files-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
 .files-toolbar p{color:#7c899c;font-size:10px;margin:0}
 .file-group{margin:24px 0}

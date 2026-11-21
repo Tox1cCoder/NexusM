@@ -39,7 +39,7 @@ New mods downloaded outside NexusM need another history import or **Add mod**, e
 ## Download a mod file
 
 1. Open a mod and read its **Overview**, **Changelog**, and **Requirements**.
-   NexusM checks the latest three changelog versions for mentions of reinstalling, a clean or fresh install, or removing an older version. When it finds one, an amber notice shows the relevant version and author text; **Read highlighted changelog** jumps to the matching instructions. This wording check is a reminder to read the author's installation steps.
+   NexusM checks the latest three changelog versions for mentions of reinstalling, a clean or fresh install, or removing an older version. When it finds one, an amber **Installation note** tag appears beside the mod's version and update date; hover it to see the author text, or select it to jump to the highlighted instructions in **Changelog**. This wording check is a reminder to read the author's installation steps.
 2. In **Files**, choose **Get this file**, or select several files and choose **Download selected**. Main files and optional files are listed separately.
 3. NexusM opens the website's normal download flow and handles its free-download controls and countdown. Sign in, choose cookie preferences, or complete a browser check if a Nexus window needs your attention.
 4. Follow progress under **Downloads**. Use the folder button beside a completed download to highlight its archive in File Explorer, then install it using the author's instructions or your mod manager. **Open download folder** opens your configured download location.

@@ -202,7 +202,7 @@
         await Promise.all(panel.getAnimations().map(animation=>animation.finished.catch(()=>{})));
         fit(panel,'Mod details');
         for(const element of $$('.detail-topbar,.detail-intro,.detail-tabs,.detail-tab-content,.file-card,.file-card-head,.file-card-meta,.file-card-actions'))fit(element,element.className);
-        fit($('.installation-warning'),'Installation warning');fit($('.installation-warning-note'),'Installation instruction excerpt');
+        fit($('.installation-tag'),'Installation tag');
         const select=$('[data-select-file="10"]');select.click();
         $('[data-preview-file="10"]').click();await settle();
         for(const folder of $$('.preview-folder'))folder.open=true;
@@ -215,7 +215,7 @@
       await check('Overview, changelog, and requirements fit',()=>{
         const panel=$('#detail-panel');
         for(const tab of ['overview','changelog','requirements']){
-          $(`[data-detail-tab="${tab}"]`).click();fit(panel,`${tab} panel`);fit($('#detail-tab-body'),`${tab} content`);fit($('.installation-warning'),'Persistent installation warning');
+          $(`[data-detail-tab="${tab}"]`).click();fit(panel,`${tab} panel`);fit($('#detail-tab-body'),`${tab} content`);fit($('.installation-tag'),'Persistent installation tag');
           if(tab==='changelog')fit($('.changelog-installation-note'),'Highlighted installation instruction');
           if(tab==='overview'){
             if(!$('.rich-text table')||!$('.rich-text pre'))fail('Wide author content must be preserved.');

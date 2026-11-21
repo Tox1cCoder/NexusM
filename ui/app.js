@@ -680,8 +680,7 @@
   function renderDetail(){
     if(!detail)return;const mod=detail.mod,img=imageUrl(picture(mod));
     detail.changelogEntries=prepareChangelogs(detail.changelogs);
-    $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span><button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button id="detail-tab-${tab}" data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}" aria-controls="detail-tab-body" tabindex="${detailTab===tab?0:-1}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body" role="tabpanel" tabindex="0" aria-labelledby="detail-tab-${detailTab}"></div>`;
-    $('.detail-intro').insertAdjacentHTML('afterend',renderInstallationWarning());
+    $('#detail-content').innerHTML=`<div class="detail-hero">${img?`<img src="${esc(img)}" alt="">`:`<div class="hero-fallback">${icon('game')}</div>`}</div><div class="detail-intro"><div class="detail-game">${esc(gameName(modDomain(mod)))}</div><h2>${esc(mod.name)}</h2><div class="detail-byline">${mod.author?`<span>By ${esc(mod.author)}</span>`:''}<span>Version ${esc(mod.version||'—')}</span><span>Updated ${esc(date(updated(mod)))}</span>${renderInstallationTag()}<button class="text-button detail-review-button" id="mark-reviewed-button" title="Dismiss the current update without changing your download date">${icon('check')}Mark reviewed</button></div></div><div class="detail-tabs" role="tablist" aria-label="Mod content">${['files','overview','changelog','requirements'].map(tab=>`<button id="detail-tab-${tab}" data-detail-tab="${tab}" class="${detailTab===tab?'active':''}" role="tab" aria-selected="${detailTab===tab}" aria-controls="detail-tab-body" tabindex="${detailTab===tab?0:-1}">${{files:'Files',overview:'Overview',changelog:'Changelog',requirements:'Requirements'}[tab]}${tab==='files'?` (${detail.files.length})`:''}</button>`).join('')}</div><div class="detail-tab-content" id="detail-tab-body" role="tabpanel" tabindex="0" aria-labelledby="detail-tab-${detailTab}"></div>`;
     renderDetailTab();
   }
   function activateDetailTab(tab,focus=false){
@@ -802,10 +801,13 @@
       return {source,instruction:index<3?installationInstruction(changelogText(source)):''};
     })}));
   }
-  function renderInstallationWarning(){
+  function renderInstallationTag(){
     const entries=detail.changelogEntries.filter(entry=>entry.notes.some(note=>note.instruction));
     if(!entries.length)return '';
-    return `<aside class="installation-warning" role="status" aria-label="Installation notice">${icon('info')}<div><strong>Check installation instructions</strong><p>Recent changelogs mention a reinstall, clean install, or removal of older files. Checked the latest three versions. Read the author’s instructions before installing.</p><ul>${entries.map(entry=>`<li><b>Version ${esc(entry.version)}</b><span class="installation-warning-note">${esc(entry.notes.find(note=>note.instruction).instruction)}</span></li>`).join('')}</ul><button class="text-button" data-review-installation>Read highlighted changelog ${icon('arrow')}</button></div></aside>`;
+    const label=entries.length===1?`Installation note · Version ${entries[0].version}`:`Installation notes · ${entries.length} versions`;
+    const notes=entries.map(entry=>`Version ${entry.version}: ${entry.notes.find(note=>note.instruction).instruction}`);
+    const summary='Recent changelogs mention a reinstall, clean install, or removal of older files. Read the highlighted changelog before installing.';
+    return `<button class="installation-tag" data-review-installation aria-describedby="installation-tag-details" title="${esc([summary,...notes].join('\n'))}">${icon('info')}<span>${esc(label)}</span></button><span class="sr-only" id="installation-tag-details">${esc(summary)}${notes.map(note=>` <span class="installation-tag-note">${esc(note)}</span>`).join('')}</span>`;
   }
   function renderDetailTab(){
     if(!detail)return;const el=$('#detail-tab-body');if(!el)return;const mod=detail.mod;
