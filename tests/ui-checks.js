@@ -215,7 +215,14 @@
         window.NexusM.setState({downloads:[...fixture.downloads,{id:'game1:2:21',gameDomain:'game1',modId:2,fileId:21,name:'Optional patch',status:'downloading',bytes:1,total:4}]});
         expect(choiceStatus.textContent==='In download queue','Active downloads must keep the queued status.');
         window.NexusM.setState({downloads:[...fixture.downloads,{id:'game1:2:21',gameDomain:'game1',modId:2,fileId:21,name:'Optional patch',status:'completed'}]});
-        expect(choiceStatus.textContent==='Optional files · open to choose'&&choiceStatus.dataset.tone==='choice'&&choices.disabled,'Finished downloads must restore the file-choice explanation.');
+        expect(choiceStatus.classList.contains('hidden')&&!choices.disabled&&!choices.checked,'A finished download from the mod details must clear its earlier file-choice tag.');
+        window.NexusM.setState({downloads:[...fixture.downloads,{id:'game1:2:21',gameDomain:'game1',modId:2,fileId:21,name:'Optional patch',status:'downloading',bytes:1,total:4}]});
+        expect(choiceStatus.classList.contains('hidden'),'Later downloads must not restore a cleared file check.');
+        window.NexusM.setState({downloads:fixture.downloads});
+        const recheck=requests.length;choices.click();
+        expect(requests.length===recheck+1&&requests.at(-1).action==='getBatchDownloadCandidates','Selecting the mod again must recheck its current files.');
+        replyCandidate([...batchCandidateRequests.values()].pop(),{gameDomain:'game1',modId:2,eligible:false,status:'ineligible',reason:'Optional files · open to choose'});await settle();
+        expect(choiceStatus.textContent==='Optional files · open to choose'&&choices.disabled,'A new check must show the current file-choice reason.');
         const retry=$('[data-select-mod="game2:3"]');retry.click();
         replyCandidate([...batchCandidateRequests.values()].pop(),null,'Nexus is temporarily unavailable.');await settle();
         expect(!retry.checked&&!retry.disabled,'A failed API call must allow another selection attempt.');

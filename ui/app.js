@@ -152,12 +152,16 @@
   const modKey = mod => `${modDomain(mod)}:${modId(mod)}`;
   const batchFingerprint = mod => JSON.stringify([mod.version,timestamp(updated(mod))]);
   const queuedStatuses = new Set(['queued','authorizing','retrying','downloading','waiting-authorization','awaiting-authorization','waiting','awaiting_authorization']);
+  const queuedModKeys = () => new Set(state.downloads.filter(download=>queuedStatuses.has(download.status)).map(modKey));
   function reconcileBatchSelection(){
     if(!batchCandidates.size&&!selectedMods.size)return;
     const mods=new Map(state.mods.map(mod=>[modKey(mod),mod]));
+    const queuedMods=queuedModKeys();
     for(const [key,candidate] of batchCandidates){
       const mod=mods.get(key);
-      if(!mod||candidate.fingerprint!==batchFingerprint(mod)||(candidate.status==='alreadyQueued'&&!state.downloads.some(download=>modKey(download)===key&&fileId(download)===Number(candidate.fileId)&&queuedStatuses.has(download.status)))){
+      // A finished download from the mod's details resolves its earlier file check.
+      if(candidate.status!=='checking'&&queuedMods.has(key))candidate.queueSeen=true;
+      if(!mod||candidate.fingerprint!==batchFingerprint(mod)||(candidate.queueSeen&&!queuedMods.has(key))||(candidate.status==='alreadyQueued'&&!state.downloads.some(download=>modKey(download)===key&&fileId(download)===Number(candidate.fileId)&&queuedStatuses.has(download.status)))){
         batchCandidates.delete(key);selectedMods.delete(key);
       }
     }
@@ -176,7 +180,7 @@
     $('#batch-selection').classList.toggle('hidden',state.mods.length===0);
     let visibleSelected=0;
     // Downloads started from a mod's Files tab update its checked row live.
-    const queuedMods=new Set(state.downloads.filter(download=>queuedStatuses.has(download.status)).map(modKey));
+    const queuedMods=queuedModKeys();
     for(const input of $$('[data-select-mod]')){
       const key=input.dataset.selectMod,candidate=batchCandidates.get(key),pendingCheck=candidate?.status==='checking';
       const checked=selectedMods.has(key)||pendingCheck,disabled=preparingBatch||clearing||pendingCheck||['ineligible','alreadyQueued'].includes(candidate?.status);
