@@ -851,6 +851,38 @@
           $('[data-detail-tab="requirements"]').click();expect($('.requirement-card u')?.textContent==='Install first','Requirement notes should render mixed formatting.');
         }finally{fakeDetails.files[0].description=file;fakeDetails.changelogs=logs;fakeDetails.requirements=requirements;await window.NexusM.showMod('game1:1');}
       });
+      await check('Markdown renders in changelogs, file notes and requirements',async()=>{
+        const file=fakeDetails.files[0].description,logs=fakeDetails.changelogs,requirements=fakeDetails.requirements;
+        try{
+          fakeDetails.changelogs={
+            '3.0':['- **Fixed** a crash in `my_mod_file.esp`\n- Added *new* [guide](https://example.com/guide_(v2)) and https://example.com/a_b_c.\n  - Nested __detail__','Plain snake_case_name and 5 * 3 * 2'],
+            '2.0':'## Fixes\n\nFirst line\nsecond line\n\n---\n> Back up `saves` first\n\n1. Remove old files\n2. Install\n```\n**literal** [b]code[/b]\n```\n\\*escaped\\* ~~removed~~ [url=javascript:alert(1)]Bad[/url] [Bad](javascript:alert(1))',
+            '1.0':['**HTML note** <script>window.__uiInjected=true</script>']
+          };
+          fakeDetails.files[0].description='Install **after** the main file:\n- Step one';
+          fakeDetails.requirements=[{name:'Framework',notes:'Use version `2.1` or *newer*'}];
+          await window.NexusM.showMod('game1:1');
+          const file=$('[data-file-card="10"] .rich-text');
+          expect(file.querySelector('strong')?.textContent==='after'&&file.querySelector('ul>li')?.textContent==='Step one','File notes should render Markdown.');
+          $('[data-detail-tab="changelog"]').click();
+          const [latest,older]=$$('.changelog-entry'),list=latest.querySelector('.rich-text>ul');
+          expect([...list.children].map(li=>li.firstChild?.textContent)[0]==='Fixed'&&list.children.length===3,'Markdown bullet notes should join the release list without nesting an extra bullet.');
+          expect(list.querySelector('code')?.textContent==='my_mod_file.esp'&&list.querySelector('em')?.textContent==='new','Inline code and emphasis should render.');
+          const links=[...list.querySelectorAll('a[href]')].map(a=>a.href);
+          expect(links.includes('https://example.com/guide_(v2)')&&links.includes('https://example.com/a_b_c'),'Markdown and bare links should render without trailing punctuation.');
+          expect(list.querySelector('li ul li strong')?.textContent==='detail','Indented bullets should nest.');
+          expect(list.children[2].textContent==='Plain snake_case_name and 5 * 3 * 2'&&!list.children[2].querySelector('em'),'Underscores inside words and spaced asterisks must stay literal.');
+          const body=older.querySelector('.rich-text');
+          expect(body.querySelector('h2')?.textContent==='Fixes'&&body.querySelector('hr')&&body.querySelector('blockquote code')?.textContent==='saves','Headings, rules and quotes should render.');
+          expect([...body.querySelectorAll('ol>li')].map(li=>li.textContent).join('|')==='Remove old files|Install','Numbered lists should render in order.');
+          expect(body.querySelector('pre code')?.textContent==='**literal** [b]code[/b]','Fenced code must stay literal.');
+          expect(body.querySelector('s')?.textContent==='removed'&&body.textContent.includes('*escaped*')&&body.innerHTML.includes('First line<br>second line'),'Strikethrough, escapes and line breaks should render.');
+          expect(!body.querySelector('script,a[href^="javascript:"]')&&!window.__uiInjected,'Markdown must not bypass the sanitizer.');
+          expect(older.querySelector(':scope>h3').textContent==='Version 2.0','Release headings stay separate from author headings.');
+          $('[data-detail-tab="requirements"]').click();
+          expect($('.requirement-card code')?.textContent==='2.1'&&$('.requirement-card em')?.textContent==='newer','Requirement notes should render Markdown.');
+        }finally{fakeDetails.files[0].description=file;fakeDetails.changelogs=logs;fakeDetails.requirements=requirements;await window.NexusM.showMod('game1:1');}
+      });
       await check('encoded BBCode links and mixed raw line breaks preserve author content',async()=>{
         const original=fakeDetails.mod.description;
         try{
@@ -897,7 +929,7 @@
       });
       await check('dictionary changelogs sort latest first and keep author note order',()=>{
         $('[data-detail-tab="changelog"]').click();
-        const versions=$$('.changelog-entry h3').map(el=>el.textContent.replace(/^Version /,''));
+        const versions=$$('.changelog-entry>h3').map(el=>el.textContent.replace(/^Version /,''));
         expect(JSON.stringify(versions)===JSON.stringify(['10','2','2.0','1.10.1','1.10','v1.10-rc.10','v1.10-rc.2','1.10-beta.2','1.10-alpha.1','1.9']),'Changelogs should use descending versions, including numeric object keys, multi-digit components, v prefixes, and previews.');
         const release=$$('.changelog-entry').find(el=>el.querySelector('h3').textContent==='Version 2.0');
         expect(JSON.stringify([...release.querySelectorAll('li')].map(el=>el.textContent))===JSON.stringify(['Fixes a bug','New dependency']),'Sorting releases must preserve the author\'s note order.');
@@ -916,7 +948,7 @@
             {name:'2.0',changelog:[{text:'First author note'},{description:'Second author note'}]}
           ];
           await window.NexusM.showMod('game1:1');$('[data-detail-tab="changelog"]').click();
-          const versions=$$('.changelog-entry h3').map(el=>el.textContent.replace(/^Version /,''));
+          const versions=$$('.changelog-entry>h3').map(el=>el.textContent.replace(/^Version /,''));
           expect(JSON.stringify(versions)===JSON.stringify(['2.0','v1.10+build.2','1.10-rc.10','1.10-rc.2','1.10-beta.2','1.10-alpha.1','v1.9']),'Array changelogs should use the same version order, treating build metadata as a stable release.');
           expect(JSON.stringify([...$('.changelog-entry').querySelectorAll('li')].map(el=>el.textContent))===JSON.stringify(['First author note','Second author note']),'Array release notes must retain their author order.');
         }finally{fakeDetails.changelogs=original;}

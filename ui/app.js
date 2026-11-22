@@ -543,14 +543,88 @@
       const path=url.pathname.match(/^\/(?:embed|shorts|live)\/([A-Za-z0-9_-]{11})\/?$/);return path?path[1]:'';
     }catch{return '';}
   }
+  // Changelogs and notes are often written in Markdown. Translate the common
+  // syntax into the BBCode below so every format shares one sanitizer.
+  const bbcodeTags='b|i|u|s|strike|url|img|youtube|quote|list|size|color|font|center|left|right|spoiler|h[1-6]|hr|\\*';
+  function markdownToBBCode(source){
+    const held=[];
+    const hold=value=>`${held.push(value)-1}`;
+    const restore=value=>{let previous;do{previous=value;value=value.replace(/(\d+)/g,(_,index)=>held[index]);}while(value!==previous);return value;};
+    const wrap=(tag,body,arg='')=>`${hold(`[${tag}${arg}]`)}${body}${hold(`[/${tag}]`)}`;
+    const bbcode=new RegExp(`\\[(url|img|youtube)\\][^\\n]*?\\[\\/\\1\\]|\\[\\/?(?:${bbcodeTags})(?:=[^\\]\\n]*)?\\]`,'gi');
+    const bareUrl=url=>{
+      // Leave sentence punctuation and an unmatched closing parenthesis outside the link.
+      let end=url.length;while(end&&(/[.,;:!?'"]/.test(url[end-1])||(url[end-1]===')'&&(url.slice(0,end).match(/\(/g)||[]).length<(url.slice(0,end).match(/\)/g)||[]).length)))end--;
+      return wrap('url',hold(url.slice(0,end)))+url.slice(end);
+    };
+    const inline=line=>line
+      .replace(/(`+)(?!`)([^\n]*?[^`\n])\1(?!`)/g,(_,fence,code)=>hold(`[icode]${code.replace(/^ ([^\n]*[^ ]) $/,'$1')}[/icode]`))
+      .replace(/\\([\\`*_~#>+\-.!|()[\]])/g,(_,character)=>hold(character))
+      .replace(/(!?)\[([^\]\n]+)\]\(\s*<?(https?:\/\/[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*)>?(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/gi,(_,image,label,url)=>image?hold(`[img]${url}[/img]`):wrap('url',label,`=${url}`))
+      .replace(bbcode,hold)
+      .replace(/<(https?:\/\/[^\s<>]+)>|https?:\/\/[^\s<>[\]"]+/gi,(url,bracketed)=>bracketed?wrap('url',hold(bracketed)):bareUrl(url))
+      .replace(/~~(?=\S)([^\n]*?\S)~~/g,(_,body)=>wrap('s',body))
+      .replace(/(^|[^\w*])\*\*\*(?=[^\s*])([^\n]*?[^\s*])\*\*\*(?![\w*])/g,(_,before,body)=>before+wrap('b',wrap('i',body)))
+      .replace(/(^|[^\w*])\*\*(?=[^\s*])([^\n]*?[^\s*])\*\*(?![\w*])/g,(_,before,body)=>before+wrap('b',body))
+      .replace(/(^|[^\w])__(?=[^\s_])([^\n]*?[^\s_])__(?!\w)/g,(_,before,body)=>before+wrap('b',body))
+      .replace(/(^|[^\w*])\*(?=[^\s*])([^\n]*?[^\s*])\*(?![\w*])/g,(_,before,body)=>before+wrap('i',body))
+      .replace(/(^|[^\w])_(?=[^\s_])([^\n]*?[^\s_])_(?!\w)/g,(_,before,body)=>before+wrap('i',body));
+    const listItem=/^([ \t]*)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
+    function list(items){
+      const levels=[];let output='';
+      for(const item of items){
+        while(levels.length&&item.indent<levels[levels.length-1])output+='[/list]',levels.pop();
+        if(!levels.length||item.indent>levels[levels.length-1])levels.push(item.indent),output+=item.ordered?'[list=1]':'[list]';
+        output+=`[*]${inline(item.text)}`;
+      }
+      return output+'[/list]'.repeat(levels.length);
+    }
+    function blocks(text){
+      const lines=text.split('\n'),parts=[];
+      for(let i=0;i<lines.length;i++){
+        const line=lines[i];let match;
+        if((match=line.match(/^ {0,3}(`{3,}|~{3,})/))){
+          const close=new RegExp(`^ {0,3}${match[1][0]}{${match[1].length},}[ \\t]*$`),body=[];
+          while(++i<lines.length&&!close.test(lines[i]))body.push(lines[i]);
+          parts.push({block:true,text:hold(`[code]${body.join('\n')}[/code]`)});continue;
+        }
+        if((match=line.match(/^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/))){parts.push({block:true,text:`[h${match[1].length}]${inline(match[2])}[/h${match[1].length}]`});continue;}
+        if(/^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(line)){parts.push({block:true,text:'[hr]'});continue;}
+        if(/^ {0,3}>/.test(line)){
+          const quoted=[];for(;i<lines.length&&/^ {0,3}>/.test(lines[i]);i++)quoted.push(lines[i].replace(/^ {0,3}> ?/,''));
+          i--;parts.push({block:true,text:`[quote]${blocks(quoted.join('\n'))}[/quote]`});continue;
+        }
+        if(listItem.test(line)){
+          const items=[];
+          for(;i<lines.length;i++){
+            const item=lines[i].match(listItem);
+            if(item){items.push({indent:item[1].replace(/\t/g,'    ').length,ordered:/\d/.test(item[2]),text:item[3]});continue;}
+            if(/^[ \t]+\S/.test(lines[i])){items[items.length-1].text+='\n'+lines[i].trim();continue;}
+            break;
+          }
+          i--;parts.push({block:true,text:list(items)});continue;
+        }
+        parts.push({block:false,text:inline(line)});
+      }
+      // Block elements bring their own spacing, so blank lines beside them would
+      // only add empty rows. Authored line breaks between text are kept.
+      const blank=part=>!part.block&&!part.text.trim();
+      const neighbour=(index,step)=>{for(index+=step;index>=0&&index<parts.length;index+=step)if(!blank(parts[index]))return parts[index];return null;};
+      const kept=parts.filter((part,index)=>{if(!blank(part))return true;const before=neighbour(index,-1),after=neighbour(index,1);return before&&after&&!before.block&&!after.block;});
+      return kept.map((part,index)=>(index&&!part.block&&!kept[index-1].block?'\n':'')+part.text).join('');
+    }
+    const text=String(source).replace(/[]/g,'').replace(/\[code(?:=[^\]\n]*)?\][\s\S]*?\[\/code\]/gi,hold);
+    return restore(blocks(text));
+  }
   function richText(source){
     if(!source)return '';
-    const text=String(source).replace(/\r\n?/g,'\n');
+    let text=String(source).replace(/\r\n?/g,'\n');
     const htmlLike=/<\/?(?:p|div|br|ul|ol|li|strong|b|em|i|u|s|img|a|span|h[1-6]|table|blockquote|pre|code|script|iframe)\b/i.test(text);
+    if(!htmlLike)text=markdownToBBCode(text);
     const root={tag:'',children:[]},stack=[root];
     // HTML tokens are opaque here, so BBCode-looking attribute values and code
     // examples are left intact for the sanitizer below.
-    const tokens=/<pre\b[^>]*>[\s\S]*?<\/pre\s*>|<code\b[^>]*>[\s\S]*?<\/code\s*>|<!--[\s\S]*?-->|<(?:[^<>"']|"[^"]*"|'[^']*')+>|\[code(?:=[^\]\n]*)?\]([\s\S]*?)\[\/code\]|\[(\/)?(b|i|u|s|strike|url|img|youtube|quote|list|size|color|font|center|left|right|spoiler|\*)(?:=([^\]\n]*))?\]/gi;
+    const tokens=new RegExp(`<pre\\b[^>]*>[\\s\\S]*?<\\/pre\\s*>|<code\\b[^>]*>[\\s\\S]*?<\\/code\\s*>|<!--[\\s\\S]*?-->|<(?:[^<>"']|"[^"]*"|'[^']*')+>|\\[code(?:=[^\\]\\n]*)?\\]([\\s\\S]*?)\\[\\/code\\]|\\[(\\/)?(${bbcodeTags})(?:=([^\\]\\n]*))?\\]|\\[icode\\]([^\\n]*?)\\[\\/icode\\]`,'gi');
     const append=value=>stack[stack.length-1].children.push(value);
     const unquote=value=>{
       const decoded=document.createElement('textarea');decoded.innerHTML=String(value??'').replace(/</g,'&lt;');
@@ -564,7 +638,9 @@
       append(raw(text.slice(cursor,match.index)));cursor=tokens.lastIndex;
       if(match[0][0]==='<'){append({tag:'html',html:raw(match[0])});continue;}
       if(match[1]!==undefined){append({tag:'code',children:[esc(match[1])]});continue;}
+      if(match[5]!==undefined){append({tag:'icode',children:[esc(match[5])]});continue;}
       const closing=!!match[2],tag=match[3].toLowerCase();
+      if(tag==='hr'){if(!closing)append({tag,children:[]});continue;}
       if(tag==='*'){
         const list=stack.map(node=>node.tag).lastIndexOf('list');
         if(list<0){append('• ');continue;}
@@ -585,9 +661,10 @@
         // Ignore HTML indentation beside block elements while retaining authored
         // line breaks in plain text and mixed inline formatting.
         if(typeof child==='string'&&/^\s*\n\s*$/.test(child)&&[node.children[index-1],node.children[index+1]].some(sibling=>sibling?.tag==='html'&&/^<\/?(?:p|div|ul|ol|li|h[1-6]|table|tr|td|th|blockquote|pre)\b/i.test(sibling.html)))return '';
-        return render(child,inCode||node.tag==='code');
+        return render(child,inCode||node.tag==='code'||node.tag==='icode');
       }).join('');
-      const tags={b:'strong',i:'em',u:'u',s:'s',strike:'s',quote:'blockquote',li:'li'};
+      const tags={b:'strong',i:'em',u:'u',s:'s',strike:'s',quote:'blockquote',li:'li',icode:'code',h1:'h1',h2:'h2',h3:'h3',h4:'h4',h5:'h5',h6:'h6'};
+      if(node.tag==='hr')return '<hr>';
       if(tags[node.tag])return `<${tags[node.tag]}>${body}</${tags[node.tag]}>`;
       if(node.tag==='code')return `<pre><code>${body}</code></pre>`;
       if(node.tag==='list')return `<${node.arg?'ol':'ul'}>${body}</${node.arg?'ol':'ul'}>`;
@@ -831,7 +908,16 @@
     }
     if(detailTab==='changelog'){
       const entries=detail.changelogEntries;
-      const noteHtml=(note,tag)=>`<${tag}${note.instruction?' class="changelog-installation-note" tabindex="-1"':''}>${richText(note.source)}</${tag}>`;
+      const noteHtml=(note,tag)=>{
+        const html=richText(note.source),attributes=note.instruction?' class="changelog-installation-note" tabindex="-1"':'';
+        // A note written as a Markdown bullet list joins the release's own list
+        // instead of nesting a second bullet inside each item.
+        const template=document.createElement('template');template.innerHTML=html;
+        const nodes=[...template.content.childNodes].filter(node=>node.nodeType!==Node.TEXT_NODE||node.textContent.trim());
+        const items=tag==='li'&&nodes.length===1&&nodes[0].tagName==='UL'?[...nodes[0].childNodes].filter(node=>node.nodeType!==Node.TEXT_NODE||node.textContent.trim()):[];
+        if(items.length&&items.every(node=>node.tagName==='LI'))return items.map(item=>`<li${attributes}>${item.innerHTML}</li>`).join('');
+        return `<${tag}${attributes}>${html}</${tag}>`;
+      };
       el.innerHTML=entries.length?entries.map(entry=>`<article class="changelog-entry${entry.notes.some(note=>note.instruction)?' changelog-entry-warning':''}"><h3>Version ${esc(entry.version)}</h3><div class="rich-text">${entry.listed?`<ul>${entry.notes.map(note=>noteHtml(note,'li')).join('')}</ul>`:entry.notes.map(note=>noteHtml(note,'div')).join('')}</div></article>`).join(''):'<p class="subtle-empty">The author hasn’t published a changelog through the API. Check the description and the mod page for release notes or pinned instructions.</p><button class="button small" data-open-mod="true">Open on Nexus '+icon('arrow')+'</button>';
     }
     if(detailTab==='requirements'){
