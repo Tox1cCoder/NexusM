@@ -80,11 +80,36 @@ namespace NexusM
                 else if (status == "interrupted" && !(Data.Get(row, "resumeOnStartup") is bool)) row["resumeOnStartup"] = true;
                 else if (row.ContainsKey("resumeOnStartup") && new[] { "completed", "cancelled", "canceled", "failed" }.Contains(status)) row["resumeOnStartup"] = false;
             }
+            RepairFutureDownloadDates();
             State["connected"] = false;
             State.Remove("refreshProgress");
             State.Remove("clearingDownloadFolder");
             State.Remove("downloadUpdates");
             State.Remove("downloadReplacements");
+        }
+        internal const long ClockSkewSeconds = 86400;
+        // Older history imports read mod names such as "Water 2077" as 1 January 2077. The
+        // download date only ever moves forward, so replace such values with the newest
+        // recorded file download, or clear them for the next Nexus refresh to restore.
+        private void RepairFutureDownloadDates() {
+            long limit = Data.Now() + ClockSkewSeconds;
+            var recorded = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var sources = Downloads.Where(row => Data.Str(row, "status") == "completed").Concat(Data.Map(Data.Get(State, "fileDownloads")).Values);
+            foreach (var row in sources) {
+                long at = Data.Num(row, "downloadedAt");
+                if (at <= 0 || at > limit) continue;
+                string key = Data.Str(row, "gameDomain").ToLowerInvariant() + ":" + Data.Num(row, "modId");
+                long known; if (!recorded.TryGetValue(key, out known) || at > known) recorded[key] = at;
+            }
+            foreach (var entry in Mods) {
+                var mod = entry as Dictionary<string, object>;
+                if (mod == null || Data.Num(mod, "lastDownloadedAt") <= limit) continue;
+                long fallback; recorded.TryGetValue(Data.Str(mod, "gameDomain").ToLowerInvariant() + ":" + Data.Num(mod, "modId"), out fallback);
+                // Without a fallback, keep the review flag until the next refresh supplies Nexus's date.
+                if (fallback <= 0) { mod.Remove("lastDownloadedAt"); continue; }
+                mod["lastDownloadedAt"] = fallback;
+                mod["needsReview"] = Data.Num(mod, "updatedAt") > Math.Max(fallback, Data.Num(mod, "reviewedAt"));
+            }
         }
         private static Dictionary<string, object> ReadState(string path) {
             try { return Data.Json.DeserializeObject(File.ReadAllText(path)) as Dictionary<string, object>; }

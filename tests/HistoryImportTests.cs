@@ -112,6 +112,50 @@ window.fetch=()=>{throw new Error('DataTable extraction should not fetch');};";
                     Expect(!Convert.ToBoolean(state["partial"]), "DataTable import should cover all pages.");
                 });
 
+                await Check("hidden DataTable columns and year-like mod names never become download dates", async delegate
+                {
+                    // Data column 0 is hidden, so visible header positions are one less than DataTable indexes.
+                    string script = @"
+const rows=[[1792368000,'Water 2077',1792281600,'Author','Gameplay','',0,3333,5162,'cyberpunk2077'],
+[1792368000,'Mayhem 12 2077',1792281600,'Author','Gameplay','',0,3333,5163,'cyberpunk2077']];
+const titles=['Hidden updated','Mod name','Last DL','Uploader','Category','Updated'];
+const headers=titles.map(t=>{const th=document.createElement('th');th.textContent=t;return th;});
+const data=[0,1,2,3,4,0];
+const table=document.querySelector('table');
+const api={settings:()=>[{oFeatures:{bServerSide:false}}],rows:()=>({indexes:()=>({toArray:()=>rows.map((_,i)=>i)})}),
+columns:()=>({indexes:()=>({toArray:()=>titles.map((_,i)=>i)})}),column:i=>({header:()=>headers[i]}),
+row:i=>({data:()=>rows[i]}),cell:(i,c)=>({render:()=>rows[i][data[c]]})};
+window.jQuery=()=>({DataTable:()=>api});
+window.jQuery.fn={dataTable:{tables:()=>[table]}};
+window.fetch=()=>{throw new Error('DataTable extraction should not fetch');};";
+                    await LoadFixture("year-names", "<table><thead><tr><th>Mod name</th><th>Last DL</th><th>Uploader</th><th>Category</th><th>Updated</th></tr></thead><tbody></tbody></table><script>" + script + "</script>", false, true);
+                    Dictionary<string, object> state = await Import("");
+                    Expect(Get(state, "status") == "complete", "Import failed: " + Get(state, "message"));
+                    object[] items = Items(state);
+                    Expect(items.Length == 2, "Expected both year-named rows.");
+                    foreach (Dictionary<string, object> item in items)
+                    {
+                        Expect(Get(item, "lastDownloadedUtc") == "2026-10-18T00:00:00.000Z", "Mod name '" + Get(item, "name") + "' changed the download date to " + Get(item, "lastDownloadedUtc") + ".");
+                        Expect(Get(item, "updatedUtc") == "2026-10-19T00:00:00.000Z", "Updated date was read from the wrong DataTable column.");
+                    }
+                });
+
+                await Check("free text and future dates are rejected while real date text still parses", async delegate
+                {
+                    string script = @"
+const values=['Water 2077','Emotional Vision 2077','March 2077','Mayhem 12 2077','Sept 2077 3:04','2077-01-01T00:00:00Z','4102444800',
+'18 October 2026, 2:44 pm','Oct 18th, 2026','2026-10-18T14:44:00Z','1792281600'];
+const rows=values.map((v,i)=>({game_domain_name:'cyberpunk2077',mod_id:i+1,name:'Mod '+(i+1),last_downloaded_at:v}));
+window.fetch=async()=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({data:rows})});";
+                    await LoadFixture("date-text", "<script>" + script + "</script>", false, true);
+                    Dictionary<string, object> state = await Import("");
+                    Expect(Get(state, "status") == "complete", "Import failed: " + Get(state, "message"));
+                    var dates = new Dictionary<int, string>();
+                    foreach (Dictionary<string, object> item in Items(state)) dates[Convert.ToInt32(item["modId"])] = Get(item, "lastDownloadedUtc");
+                    for (int id = 1; id <= 7; id++) Expect(dates[id] == "", "Value " + id + " should not parse as a download date but became " + dates[id] + ".");
+                    for (int id = 8; id <= 11; id++) Expect(dates[id].StartsWith("2026-10-1"), "Real date value " + id + " was rejected.");
+                });
+
                 await Check("signed-in website endpoint without jQuery, full history and selected game filter", async delegate
                 {
                     string script = RowsScript(261) + @"

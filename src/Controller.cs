@@ -441,11 +441,13 @@ namespace NexusM
                 var old = FindMod(domain, id);
                 if (old == null) { old = Data.Obj("gameDomain", domain, "modId", id, "name", Data.Str(entry, "name"), "pictureUrl", Data.Str(entry, "thumbnailUrl"), "url", "https://www.nexusmods.com/" + domain + "/mods/" + id); Store.Mods.Add(old); }
                 long downloaded = Data.Timestamp(Data.Get(entry, "lastDownloadedAt")); if (downloaded == 0) downloaded = Data.Timestamp(Data.Get(entry, "lastDownloadedUtc"));
+                // A future download date is a misread value and would otherwise stick forever.
+                if (downloaded > Data.Now() + Storage.ClockSkewSeconds) downloaded = 0;
                 if (downloaded > Data.Num(old, "lastDownloadedAt")) old["lastDownloadedAt"] = downloaded;
                 if (Data.Num(entry, "reviewedAt") > Data.Num(old, "reviewedAt")) old["reviewedAt"] = Data.Num(entry, "reviewedAt");
                 foreach (string field in new[] { "name", "author", "pictureUrl", "version", "summary" }) if (!String.IsNullOrWhiteSpace(Data.Str(entry, field))) old[field] = Data.Str(entry, field);
                 long updated = Data.Timestamp(Data.Get(entry, "updatedAt")); if (updated == 0) updated = Data.Timestamp(Data.Get(entry, "updatedUtc"));
-                if (updated > 0) old["updatedAt"] = updated;
+                if (updated > 0 && updated <= Data.Now() + Storage.ClockSkewSeconds) old["updatedAt"] = updated;
                 old["needsReview"] = Data.Num(old, "updatedAt") > Math.Max(Data.Num(old, "lastDownloadedAt"), Data.Num(old, "reviewedAt")); count++;
             }
             // The import can include games outside current favourites; keep the website favourites strip intact.

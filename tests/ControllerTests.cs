@@ -32,6 +32,7 @@ namespace NexusM
                 Check("backup restores game and mod metadata, dates, review state, and local game ownership", TestRestore);
                 Check("successful file history survives restore independently from the queue", TestFileHistory);
                 Check("import merges newer download and reviewed dates without rollback or duplicates", TestDateMerge);
+                Check("startup repairs future download dates from file history or clears them", TestFutureDownloadDateRepair);
                 Check("invalid imported domains and IDs are ignored, valid domains are normalized", TestInvalidImports);
                 Check("incomplete transfers recover as interrupted without corrupting finished records", TestInterruptedStartup);
                 Check("all unfinished downloads survive queues larger than the old 500-entry limit", TestLargeQueuePersistence);
@@ -243,7 +244,28 @@ namespace NexusM
                 Import(controller, new[] { Data.Obj("gameDomain", "baldursgate3", "modId", 5508, "lastDownloadedUtc", "2026-10-20T12:00:00Z", "updatedUtc", "2026-10-19T00:00:00Z") });
                 Expect(Data.Num(storage.Mods[0], "lastDownloadedAt") == 1792497600, "ISO history dates were not imported.");
                 Expect(!Data.Bool(storage.Mods[0], "needsReview"), "Downloaded update remained flagged for review.");
+                // A history date misread from a name such as "Water 2077" must never stick.
+                Import(controller, new[] { Data.Obj("gameDomain", "baldursgate3", "modId", 5508, "lastDownloadedUtc", "2076-12-31T17:00:00.000Z", "updatedUtc", "2076-12-31T17:00:00.000Z") });
+                Expect(Data.Num(storage.Mods[0], "lastDownloadedAt") == 1792497600, "A future history download date replaced the real one.");
+                Expect(Data.Num(storage.Mods[0], "updatedAt") < 3000000000, "A future history update date was imported.");
             });
+        }
+
+        private static void TestFutureDownloadDateRepair()
+        {
+            Storage storage = NewStore("future-dates");
+            storage.Mods.Add(Data.Obj("gameDomain", "cyberpunk2077", "modId", 5162L, "name", "Water 2077", "lastDownloadedAt", 3376659600L, "updatedAt", 1662793194L, "needsReview", false));
+            storage.Mods.Add(Data.Obj("gameDomain", "cyberpunk2077", "modId", 14467L, "name", "Emotional Vision 2077", "lastDownloadedAt", 3376659600L, "updatedAt", 1786622178L, "needsReview", false));
+            storage.Mods.Add(Data.Obj("gameDomain", "cyberpunk2077", "modId", 1L, "name", "Untouched", "lastDownloadedAt", 1790000000L));
+            storage.State["fileDownloads"] = Data.Obj(
+                "cyberpunk2077:14467:10", Data.Obj("gameDomain", "cyberpunk2077", "modId", 14467L, "fileId", 10L, "status", "completed", "downloadedAt", 1785000000L),
+                "cyberpunk2077:14467:11", Data.Obj("gameDomain", "cyberpunk2077", "modId", 14467L, "fileId", 11L, "status", "completed", "downloadedAt", 1787000000L));
+            storage.Save();
+            Storage reopened = new Storage(storage.Root);
+            Expect(!Data.Map(reopened.Mods[0]).ContainsKey("lastDownloadedAt"), "A future download date without file history was kept.");
+            Expect(Data.Num(reopened.Mods[1], "lastDownloadedAt") == 1787000000L, "A future download date was not replaced by the newest recorded file download.");
+            Expect(!Data.Bool(reopened.Mods[1], "needsReview"), "Review state was not recomputed from the repaired date.");
+            Expect(Data.Num(reopened.Mods[2], "lastDownloadedAt") == 1790000000L, "A valid download date was changed.");
         }
 
         private static void TestInvalidImports()

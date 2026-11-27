@@ -52,6 +52,12 @@ namespace NexusM
     };
     const normalizeText = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
     const plain = value => normalizeText(parseHtml(value).textContent);
+    // Chromium's Date.parse accepts free text such as 'Water 2077' as 1 January 2077.
+    // Only parse text that has a real date shape so mod names never become dates.
+    const monthName = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+    const looksLikeDate = text => /\b\d{4}-\d{1,2}-\d{1,2}(?!\d)/.test(text) ||
+        /\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}(?!\d)/.test(text) ||
+        (monthName.test(text) && /\b\d{4}\b/.test(text) && /(?:^|[^\d:])\d{1,2}(?!\d|:)/.test(text.replace(/\b\d{4}\b/g, ' ')));
     const dateIso = value => {
         if (value == null || value === '') return null;
         if (typeof value === 'object') {
@@ -66,11 +72,12 @@ namespace NexusM
             milliseconds = number > 100000000000 ? number : number * 1000;
         } else {
             const text = plain(raw).replace(/(\d)(st|nd|rd|th)\b/gi, '$1').replace(/\s+/g, ' ');
-            milliseconds = Date.parse(text);
+            milliseconds = looksLikeDate(text) ? Date.parse(text) : NaN;
         }
         if (!Number.isFinite(milliseconds)) return null;
         const date = new Date(milliseconds);
-        if (date.getUTCFullYear() < 2000 || date.getUTCFullYear() > 2100) return null;
+        // History dates are in the past; allow a day of clock skew.
+        if (date.getUTCFullYear() < 2000 || milliseconds > Date.now() + 86400000) return null;
         return date.toISOString();
     };
     const safeImage = html => {
@@ -129,14 +136,23 @@ namespace NexusM
         }
         return null;
     };
-    const tableColumns = table => {
+    const headerColumns = headers => {
         const columns = {};
-        Array.from(table.querySelectorAll('thead th')).forEach((header, index) => {
-            const title = normalizeText(header.textContent).toLowerCase();
+        headers.forEach(([header, index]) => {
+            const title = normalizeText(header && header.textContent).toLowerCase();
             if (/last\s*(dl|download)|downloaded/.test(title)) columns.downloaded = index;
             if (/updated/.test(title)) columns.updated = index;
         });
         return columns;
+    };
+    const tableColumns = table => headerColumns(Array.from(table.querySelectorAll('thead th')).map((header, index) => [header, index]));
+    // Visible header positions skip hidden DataTable columns; ask DataTables for its own
+    // column indexes so a date column never resolves to the mod-name column.
+    const dataTableColumns = (api, table) => {
+        try {
+            if (api.columns) return headerColumns(api.columns().indexes().toArray().map(index => [api.column(index).header(), index]));
+        } catch (_) { }
+        return tableColumns(table);
     };
     const dataTableRows = () => {
         const jq = window.jQuery;
@@ -148,7 +164,7 @@ namespace NexusM
             const api = jq(table).DataTable();
             const settings = api.settings()[0];
             if (settings && settings.oFeatures && settings.oFeatures.bServerSide) continue;
-            const columns = tableColumns(table);
+            const columns = dataTableColumns(api, table);
             const rowIndexes = api.rows({search: 'none'}).indexes().toArray();
             state.total = rowIndexes.length;
             for (const index of rowIndexes) {
@@ -164,7 +180,8 @@ namespace NexusM
                     }
                     add(result);
                 } else {
-                    const rendered = Array.from(table.querySelectorAll('thead th')).map((_, col) => api.cell(index, col).render('display'));
+                    const count = api.columns ? api.columns().indexes().toArray().length : table.querySelectorAll('thead th').length;
+                    const rendered = Array.from({length: count}, (_, col) => api.cell(index, col).render('display'));
                     add(parseRow(rendered, columns));
                 }
                 state.processed++;
